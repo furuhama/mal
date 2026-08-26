@@ -114,6 +114,12 @@ pub fn default_env() -> Arc<Env> {
         ("alter", alter),
         ("commute", commute),
         ("ensure", ensure),
+        // Phase 4
+        ("not", not_fn),
+        ("concat", concat_fn),
+        ("meta", meta_fn),
+        ("with-meta", with_meta_fn),
+        ("throw", throw_fn),
     ];
     for &(bname, func) in BUILTINS.iter() {
         env.set(bname.to_string(), Value::MalFn(Arc::new(MalFn::Builtin { name: bname, func })));
@@ -1172,4 +1178,76 @@ fn ensure(args: &[Value]) -> Result<Value, MalError> {
         return Err(MalError::type_err("ensure の引数は ref です"));
     };
     r.read(true)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4: not / concat / meta / with-meta / throw
+// ---------------------------------------------------------------------------
+
+fn not_fn(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() != 1 {
+        return Err(MalError::arity("not は 1 引数です"));
+    }
+    Ok(Value::Bool(!args[0].truthy()))
+}
+
+/// リストを連結する (quasiquote の展開で使う)。
+fn concat_fn(args: &[Value]) -> Result<Value, MalError> {
+    let mut out = Vec::new();
+    for a in args {
+        match a {
+            Value::Nil => {}
+            Value::List(l) => out.extend(list::to_vec(l)),
+            _ => return Err(MalError::type_err("concat はリストのみ受け付けます")),
+        }
+    }
+    Ok(Value::List(list::from_vec(out)))
+}
+
+/// メタデータを返す (なければ nil)。`apply` 側でメタは剥がされない唯一の組み込み。
+fn meta_fn(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() != 1 {
+        return Err(MalError::arity("meta は 1 引数です"));
+    }
+    match &args[0] {
+        Value::WithMeta(w) => Ok(Value::Map(Arc::clone(&w.meta))),
+        _ => Ok(Value::Nil),
+    }
+}
+
+/// 値にメタデータを付ける。既存のメタデータは置き換える。
+fn with_meta_fn(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() != 2 {
+        return Err(MalError::arity("with-meta は (with-meta x m) の形です"));
+    }
+    let meta = match &args[1] {
+        Value::Nil => return Ok(args[0].clone()),
+        Value::Map(m) => (**m).clone(),
+        _ => return Err(MalError::type_err("with-meta の第 2 引数はマップまたは nil です")),
+    };
+    let value = match &args[0] {
+        Value::WithMeta(w) => w.value.clone(),
+        v => v.clone(),
+    };
+    Ok(Value::WithMeta(Arc::new(crate::types::WithMetaValue {
+        value,
+        meta: Arc::new(meta),
+    })))
+}
+
+/// ユーザーエラーを投げる (try/catch で捕捉できる)。
+fn throw_fn(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() != 1 {
+        return Err(MalError::arity("throw は 1 引数です"));
+    }
+    let msg = match &args[0] {
+        Value::Str(s) => s.clone(),
+        Value::Map(m) => match m.get(&Value::Keyword("message".to_string())) {
+            Some(Value::Str(s)) => s.clone(),
+            Some(v) => pr_str(&v),
+            None => "throw".to_string(),
+        },
+        v => pr_str(v),
+    };
+    Err(MalError::new(crate::types::ErrorKind::User, msg))
 }

@@ -1,0 +1,29 @@
+; メタデータ (SPEC Phase 4)
+
+; --- defn のドキュメント文字列 → :doc メタデータ ---
+(defn add "2 つの数を足す" [a b] (+ a b))
+(println (add 1 2))
+(println (meta add))
+(println (get (meta add) :doc))
+
+; --- with-meta / meta ---
+(def x (with-meta [1 2 3] {:doc "ベクタ"}))
+(println x)
+(println (meta x))
+(println (first x))
+(println (count x))
+
+; --- 等価性はメタデータに影響されない ---
+(println (= x [1 2 3]))
+(println (= (with-meta 5 {:n 1}) 5))
+
+; --- メタデータの置き換え ---
+(def y (with-meta x {:note "置き換え"}))
+(println (meta y))
+
+; --- メタのない値は nil ---
+(println (meta [1 2]))
+
+; --- キーワードは関数としてマップ検索に使える (:k m) ---
+(println (:doc (meta x)))
+(println (:missing {:a 1}))

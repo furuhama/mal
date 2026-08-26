@@ -202,14 +202,37 @@
 
 ## 9. 非目標（今回のスコープ外）
 
-- マクロ `defmacro`（Phase 4 で任意。代わりに `cond` / `when` を特殊形式として提供）
-- メタデータ / `with-meta`（Phase 4 で任意）
-- `try` / `catch`（Phase 4 で任意）
 - Java・ホスト相互運用、`ns`・名前空間
 - lazy seq / シーケンスの遅延評価
 - protocol / multimethod / record / type
 - 有理数・分数、文字型 (char)、正規表現リテラル
 - スレッド生成の高級 API（`future` のみ提供）
+- マクロの完全な再帰・ハイジーン（gensym）。マクロは**非ハイジーン**（シンボル捕捉の可能性あり）
+- シンタックスクォートの名前空間修飾。quasiquote のシンボルはそのまま保持される
+
+## 9.5 Phase 4（マクロ・メタデータ・例外）— 実装済み
+
+### 9.5.1 マクロ (defmacro)
+
+- `(defmacro name [params] body...)` — マクロを定義。呼び出し時に**未評価の引数**で展開し、展開結果を評価する。`defn` と同様にドキュメント文字列を付与できる。
+- 展開はコード生成: `quasiquote`（`` ` ``）/ `unquote`（`~`）/ `unquote-splicing`（`~@`）の糖衣を提供する。
+- `(macroexpand-1 form)` / `(macroexpand form)` — 展開結果の確認用。
+- マクロは関数として適用できない（`:syntax` エラー）。
+- **非ハイジーン**: マクロが生成するシンボルは呼び出し側の環境に干渉しうる。
+
+### 9.5.2 メタデータ
+
+- `(with-meta x m)` — 値にメタデータ（マップ）を付与。`(meta x)` — 取得（なければ `nil`）。
+- メタデータは**等価性・表示・ハッシュ・関数適用で透過**（`(= (with-meta [1] m) [1])` は真）。
+- `(defn name "doc" [params] body...)` — ドキュメント文字列は `:doc` メタデータになる。
+
+### 9.5.3 try / catch / finally
+
+- `(try body... (catch e body...)? (finally body...)?)` — エラーを捕捉。
+- `e` には `{:message "... " :kind :unbound|:type|...}` のマップを束縛。
+- `(throw x)` — ユーザーエラーを投げる（文字列または `:message` を持つマップ）。
+- `finally` は成功・失敗にかかわらず実行される。
+- キーワードは関数としてマップ検索に使える（`(:k m)` = `(get m :k)`）。
 
 ## 10. REPL / 実行
 
@@ -229,7 +252,7 @@
 | 1 | コア言語: reader / printer / eval / 特殊形式 / コア関数 / REPL | ゴールデンテストが通る |
 | 2 | 永続データ構造の本実装（自作） | 挙動同一 + ベンチマーク |
 | 3 | atom / ref / STM / future + デモ | 並行テストが通る |
-| 4 (任意) | defmacro / metadata / try-catch | — |
+| 4 | defmacro / quasiquote / metadata / try-catch | ゴールデンテストが通る |
 
 ## 13. 変更履歴
 

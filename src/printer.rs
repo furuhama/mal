@@ -31,11 +31,14 @@ pub fn pr_str(v: &Value) -> String {
         Value::Set(s) => format!("#{{{}}}", join(&s.to_vec())),
         Value::MalFn(f) => match &**f {
             MalFn::Builtin { name, .. } => format!("#<builtin {}>", name),
+            MalFn::Macro(_) => "#<macro>".to_string(),
             _ => "#<fn>".to_string(),
         },
         Value::Atom(_) => "#<atom>".to_string(),
         Value::Ref(_) => "#<ref>".to_string(),
         Value::Future(_) => "#<future>".to_string(),
+        // メタデータは表示されない (透過)
+        Value::WithMeta(w) => pr_str(&w.value),
     }
 }
 

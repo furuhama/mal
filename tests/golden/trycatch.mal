@@ -1,0 +1,22 @@
+; try / catch / finally (SPEC Phase 4)
+
+; --- 正常系 ---
+(println (try (+ 1 2) (catch e 0)))
+(println (try 42 (finally (println "正常時も finally 実行"))))
+
+; --- エラー捕捉: エラー値は {:message ... :kind ...} のマップ ---
+(println (try (foo) (catch e (:kind e))))
+(println (try (nth [1 2] 5) (catch e (:kind e))))
+(println (try (/ 1 0) (catch e (:kind e))))
+(println (try (ref-set (ref 0) 1) (catch e (:kind e))))
+
+; --- throw ---
+(println (try (throw "手動エラー") (catch e (:message e))))
+(println (try (throw {:message "マップで投げる"}) (catch e (:message e))))
+
+; --- catch + finally の組み合わせ ---
+(println (try (throw "x") (catch e (:message e)) (finally (println "finally 実行"))))
+
+; --- 捕捉されないエラーは伝播 ---
+(def x (try 1 (catch e 2)))
+(println x)

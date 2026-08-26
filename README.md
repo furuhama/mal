@@ -10,6 +10,7 @@
 - **Phase 1（コア言語）実装済み**: reader / printer / eval / 特殊形式 / コア関数 / REPL
 - **Phase 2（永続データ構造）実装済み**: PVector（32-way トライ + tail）/ マップ（Array ≤8 → HAMT）/ セット / cons セルリスト + ベンチマーク
 - **Phase 3（並行性と STM）実装済み**: atom / ref / dosync（検証つきトランザクション・再試行）/ future + 口座振込デモ
+- **Phase 4（マクロ・メタデータ・例外）実装済み**: defmacro / quasiquote（`` ` `` `~` `~@`）/ with-meta / try-catch-finally / throw
 
 ## 使い方
 
@@ -17,19 +18,20 @@
 cargo run            # REPL 起動
 cargo run -- file.mal   # ファイル実行
 cargo run -- demos/bank-transfer.mal   # STM デモ (並行口座振込)
+cargo run -- demos/macros.mal          # マクロデモ
 cargo test           # ユニット + ゴールデン + STM ストレステスト
 cargo run --release --example bench   # 永続データ構造のベンチマーク
 ```
 
-## REPL で STM を試す
+## REPL で試す
 
 ```clojure
-(def c (atom 0))          ; => c
-(swap! c inc)             ; => 1
-(def r (ref 0))           ; => r
-(dosync (alter r + 10))   ; => 10
-(def f (future (* 6 7)))  ; => f
-@f                        ; => 42
+(defmacro unless [c & body] `(if (not ~c) (do ~@body) nil))
+(unless false :yes)              ; => :yes
+(defn add "足し算" [a b] (+ a b))
+(meta add)                       ; => {:doc "足し算"}
+(try (foo) (catch e (:kind e)))  ; => :unbound
+(def c (atom 0)) (swap! c inc)   ; atom も使える
 ```
 
 ## ロードマップ

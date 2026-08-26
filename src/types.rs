@@ -32,6 +32,24 @@ pub enum Value {
     Ref(Arc<crate::stm::Ref>),
     /// 別スレッドで実行される計算 (SPEC §8.4)。
     Future(Arc<crate::stm::Future>),
+    /// メタデータ付きの値 (SPEC Phase 4)。`meta` / `with-meta` で操作する。
+    /// 等価性・表示・ハッシュ・関数適用では透過的に扱われる。
+    WithMeta(Arc<WithMetaValue>),
+}
+
+/// メタデータ付きの値の中身。
+#[derive(Debug)]
+pub struct WithMetaValue {
+    pub value: Value,
+    pub meta: Arc<crate::persistent::PHam>,
+}
+
+/// メタデータを透過的に剥がす (再帰的)。
+pub fn strip_meta(v: &Value) -> &Value {
+    match v {
+        Value::WithMeta(w) => strip_meta(&w.value),
+        _ => v,
+    }
 }
 
 /// リストの cons セル。`None` が空リスト。
@@ -101,6 +119,9 @@ pub enum MalFn {
     Comp { fns: Vec<Value> },
     /// `constantly` が生成する定数関数。
     Constantly(Value),
+    /// マクロ (SPEC Phase 4)。`defmacro` で定義し、呼び出し時に未評価の引数で
+    /// 展開される。関数としての適用はできない。
+    Macro(Arc<UserFn>),
 }
 
 /// ユーザー定義関数の中身。
@@ -115,7 +136,10 @@ pub struct UserFn {
 impl Value {
     /// Clojure の真偽規則 (SPEC §3.1): `false` と `nil` のみ偽。
     pub fn truthy(&self) -> bool {
-        !matches!(self, Value::Nil | Value::Bool(false))
+        match self {
+            Value::WithMeta(w) => w.value.truthy(),
+            _ => !matches!(self, Value::Nil | Value::Bool(false)),
+        }
     }
 }
 
@@ -139,6 +163,10 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Atom(x), Value::Atom(y)) => Arc::ptr_eq(x, y),
         (Value::Ref(x), Value::Ref(y)) => Arc::ptr_eq(x, y),
         (Value::Future(x), Value::Future(y)) => Arc::ptr_eq(x, y),
+        // メタデータは等価性に影響しない (Clojure 準拠)
+        (Value::WithMeta(x), Value::WithMeta(y)) => values_equal(&x.value, &y.value),
+        (Value::WithMeta(x), y) => values_equal(&x.value, y),
+        (x, Value::WithMeta(y)) => values_equal(x, &y.value),
         _ => false,
     }
 }
@@ -175,7 +203,25 @@ pub enum ErrorKind {
     Syntax,   // 構文エラー (recur の位置など)
     #[allow(dead_code)] // Phase 3 で使用
     Stm,      // STM エラー
+    User,     // throw によるユーザーエラー (Phase 4)
     Internal, // 内部エラー
+}
+
+impl ErrorKind {
+    /// catch でエラー値に載せる機械可読な名前 (SPEC Phase 4)。
+    pub fn name(&self) -> &'static str {
+        match self {
+            ErrorKind::Reader => "reader",
+            ErrorKind::Unbound => "unbound",
+            ErrorKind::Arity => "arity",
+            ErrorKind::Type => "type",
+            ErrorKind::Range => "range",
+            ErrorKind::Syntax => "syntax",
+            ErrorKind::Stm => "stm",
+            ErrorKind::User => "user",
+            ErrorKind::Internal => "internal",
+        }
+    }
 }
 
 impl fmt::Display for ErrorKind {
@@ -188,6 +234,7 @@ impl fmt::Display for ErrorKind {
             ErrorKind::Range => "範囲外アクセス",
             ErrorKind::Syntax => "構文エラー",
             ErrorKind::Stm => "STM エラー",
+            ErrorKind::User => "ユーザーエラー",
             ErrorKind::Internal => "内部エラー",
         };
         f.write_str(s)

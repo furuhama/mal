@@ -1,0 +1,12 @@
+3
+nil
+(if (not false) (do 1 2) nil)
+3
+7
+8
+12
+[1 2]
+1
+10
+1
+:syntax

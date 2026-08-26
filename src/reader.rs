@@ -36,6 +36,23 @@ fn tokenize(src: &str) -> Result<Vec<Token>, MalError> {
             chars.next();
             continue;
         }
+        if c == '`' {
+            // quasiquote の糖衣 (Phase 4)
+            tokens.push(Token { text: "`".to_string(), offset: start });
+            chars.next();
+            continue;
+        }
+        if c == '~' {
+            // unquote / unquote-splicing の糖衣 (Phase 4)
+            chars.next();
+            if let Some(&(_, '@')) = chars.peek() {
+                chars.next();
+                tokens.push(Token { text: "~@".to_string(), offset: start });
+            } else {
+                tokens.push(Token { text: "~".to_string(), offset: start });
+            }
+            continue;
+        }
         if c == '#' {
             // #{ のみセットリテラルとして対応する (SPEC §3)
             chars.next(); // '#' を消費
@@ -151,6 +168,9 @@ impl Parser<'_> {
             ")" | "]" | "}" => Err(self.pos_err(&tok, "対応する開き括弧がありません")),
             "'" => self.parse_sugar(&tok, "quote"),
             "@" => self.parse_sugar(&tok, "deref"),
+            "`" => self.parse_sugar(&tok, "quasiquote"),
+            "~" => self.parse_sugar(&tok, "unquote"),
+            "~@" => self.parse_sugar(&tok, "unquote-splicing"),
             _ => self.parse_atom(&tok),
         }
     }
@@ -340,6 +360,13 @@ mod tests {
         assert_eq!(pr_str(&v), "(quote a)");
         let v = read_str("@x").unwrap();
         assert_eq!(pr_str(&v), "(deref x)");
+        // Phase 4: quasiquote / unquote / unquote-splicing
+        let v = read_str("`(a b)").unwrap();
+        assert_eq!(pr_str(&v), "(quasiquote (a b))");
+        let v = read_str("~x").unwrap();
+        assert_eq!(pr_str(&v), "(unquote x)");
+        let v = read_str("~@xs").unwrap();
+        assert_eq!(pr_str(&v), "(unquote-splicing xs)");
     }
 
     #[test]

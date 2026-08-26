@@ -7,7 +7,7 @@
 use crate::env::Env;
 use crate::persistent::{PHam, PSet, PVector};
 use crate::printer::pr_str;
-use crate::types::{list, MalError, MalFn, UserFn, Value};
+use crate::types::{list, strip_meta, MalError, MalFn, UserFn, Value, WithMetaValue};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -70,25 +70,40 @@ fn eval_list(env: &Arc<Env>, list: &Option<Arc<crate::types::ListCell>>, tail: b
         // 空リストは自分自身に評価される (Clojure 準拠)
         return Ok(Value::List(None));
     };
+    // 未評価の引数 (マクロ展開用)
+    let mut raw: Vec<Value> = Vec::new();
+    let mut cur = head_cell.tail.as_ref();
+    while let Some(cell) = cur {
+        raw.push(cell.head.clone());
+        cur = cell.tail.as_ref();
+    }
     if let Value::Symbol(name) = &head_cell.head {
         if let Some(special) = special_form(name) {
             return eval_special(env, special, &list::to_vec(list), tail);
         }
+        // マクロ: シンボルがマクロに束縛されていれば、未評価の引数で展開して評価する
+        if let Some(v) = env.get(name) {
+            if let Value::MalFn(mf) = strip_meta(&v) {
+                if let MalFn::Macro(uf) = &**mf {
+                    let expansion = apply_user(uf, &raw)?;
+                    return eval(env, &expansion, tail);
+                }
+            }
+        }
     }
     let f = eval(env, &head_cell.head, false)?;
-    let mut args = Vec::new();
-    let mut cur = head_cell.tail.as_ref();
-    while let Some(cell) = cur {
-        args.push(eval(env, &cell.head, false)?);
-        cur = cell.tail.as_ref();
+    let mut args = Vec::with_capacity(raw.len());
+    for a in &raw {
+        args.push(eval(env, a, false)?);
     }
     apply(&f, &args).map_err(EvalErr::Mal)
 }
 
 fn special_form(name: &str) -> Option<&str> {
     match name {
-        "def" | "fn" | "defn" | "let" | "if" | "do" | "quote" | "and" | "or" | "cond" | "when"
-        | "loop" | "recur" | "time" | "dosync" | "future" => Some(name),
+        "def" | "fn" | "defn" | "defmacro" | "let" | "if" | "do" | "quote" | "quasiquote"
+        | "and" | "or" | "cond" | "when" | "loop" | "recur" | "time" | "dosync" | "future"
+        | "try" | "macroexpand" | "macroexpand-1" => Some(name),
         _ => None,
     }
 }
@@ -123,19 +138,35 @@ fn eval_special(env: &Arc<Env>, name: &str, list: &[Value], tail: bool) -> Resul
             if list.len() < 4 {
                 return Err(MalError::arity("defn は (defn name [params] body...) の形です").into());
             }
-            let Value::Symbol(name_sym) = &list[1] else {
-                return Err(MalError::syntax("defn の第 1 引数はシンボルである必要があります").into());
-            };
-            let (params, rest) = parse_params(&list[2])?;
-            let body = list[3..].to_vec();
-            let f = Value::MalFn(Arc::new(MalFn::User(Arc::new(UserFn {
-                params,
-                rest,
-                body,
+            let spec = parse_def_spec(list)?;
+            let mut f = Value::MalFn(Arc::new(MalFn::User(Arc::new(UserFn {
+                params: spec.params,
+                rest: spec.rest,
+                body: spec.body,
                 env: Arc::clone(env),
             }))));
-            env.set(name_sym.clone(), f);
-            Ok(Value::Symbol(name_sym.clone()))
+            if let Some(doc) = spec.doc {
+                f = attach_doc(f, doc);
+            }
+            env.set(spec.name.clone(), f);
+            Ok(Value::Symbol(spec.name))
+        }
+        "defmacro" => {
+            if list.len() < 4 {
+                return Err(MalError::arity("defmacro は (defmacro name [params] body...) の形です").into());
+            }
+            let spec = parse_def_spec(list)?;
+            let mut f = Value::MalFn(Arc::new(MalFn::Macro(Arc::new(UserFn {
+                params: spec.params,
+                rest: spec.rest,
+                body: spec.body,
+                env: Arc::clone(env),
+            }))));
+            if let Some(doc) = spec.doc {
+                f = attach_doc(f, doc);
+            }
+            env.set(spec.name.clone(), f);
+            Ok(Value::Symbol(spec.name))
         }
         "let" => {
             if list.len() < 3 {
@@ -326,6 +357,40 @@ fn eval_special(env: &Arc<Env>, name: &str, list: &[Value], tail: bool) -> Resul
                 list[1..].to_vec(),
             )))
         }
+        "quasiquote" => {
+            if list.len() != 2 {
+                return Err(MalError::arity("quasiquote は (quasiquote form) の形です").into());
+            }
+            // 生成したコードを評価する。unquote 部分はこの環境で解決される
+            // (マクロの引数はここで展開される)。
+            let code = quasiquote(&list[1]);
+            eval(env, &code, false)
+        }
+        "try" => {
+            if list.len() < 2 {
+                return Err(MalError::arity("try には body が必要です").into());
+            }
+            eval_try(env, &list[1..], tail)
+        }
+        "macroexpand-1" => {
+            if list.len() != 2 {
+                return Err(MalError::arity("macroexpand-1 は 1 引数です").into());
+            }
+            match macroexpand_once(env, &list[1])? {
+                Some(e) => Ok(e),
+                None => Ok(list[1].clone()),
+            }
+        }
+        "macroexpand" => {
+            if list.len() != 2 {
+                return Err(MalError::arity("macroexpand は 1 引数です").into());
+            }
+            let mut form = list[1].clone();
+            while let Some(e) = macroexpand_once(env, &form)? {
+                form = e;
+            }
+            Ok(form)
+        }
         _ => Err(MalError::internal(format!("未知の特殊形式: {}", name)).into()),
     }
 }
@@ -362,6 +427,240 @@ fn parse_params(form: &Value) -> Result<(Vec<String>, Option<String>), MalError>
     Ok((params, rest))
 }
 
+/// defn / defmacro の共通解析。`(defn name "doc"? [params] body...)` の形。
+struct DefSpec {
+    name: String,
+    doc: Option<String>,
+    params: Vec<String>,
+    rest: Option<String>,
+    body: Vec<Value>,
+}
+
+fn parse_def_spec(list: &[Value]) -> Result<DefSpec, MalError> {
+    let Value::Symbol(name_sym) = &list[1] else {
+        return Err(MalError::syntax("名前はシンボルである必要があります"));
+    };
+    let mut idx = 2;
+    let mut doc = None;
+    if let Value::Str(d) = &list[2] {
+        doc = Some(d.clone());
+        idx = 3;
+    }
+    if idx >= list.len() {
+        return Err(MalError::arity("引数ベクタと body が必要です"));
+    }
+    let (params, rest) = parse_params(&list[idx])?;
+    let body = list[idx + 1..].to_vec();
+    if body.is_empty() {
+        return Err(MalError::arity("body が必要です"));
+    }
+    Ok(DefSpec { name: name_sym.clone(), doc, params, rest, body })
+}
+
+/// ドキュメント文字列を :doc メタデータとして付与する (Clojure 準拠)。
+fn attach_doc(v: Value, doc: String) -> Value {
+    let meta = PHam::empty().assoc(Value::Keyword("doc".to_string()), Value::Str(doc));
+    Value::WithMeta(Arc::new(WithMetaValue { value: v, meta: Arc::new(meta) }))
+}
+
+/// マクロが 1 回展開できれば Some(展開結果)、できなければ None。
+/// 特殊形式の先頭は展開しない (Clojure 準拠)。
+fn macroexpand_once(env: &Arc<Env>, form: &Value) -> Result<Option<Value>, MalError> {
+    let Value::List(l) = form else {
+        return Ok(None);
+    };
+    let Some(head_cell) = l else {
+        return Ok(None);
+    };
+    let Value::Symbol(name) = &head_cell.head else {
+        return Ok(None);
+    };
+    if special_form(name).is_some() {
+        return Ok(None);
+    }
+    let Some(v) = env.get(name) else {
+        return Ok(None);
+    };
+    let Value::MalFn(mf) = strip_meta(&v) else {
+        return Ok(None);
+    };
+    let MalFn::Macro(uf) = &**mf else {
+        return Ok(None);
+    };
+    let raw = list::to_vec(l).into_iter().skip(1).collect::<Vec<_>>();
+    let expansion = apply_user(uf, &raw)?;
+    Ok(Some(expansion))
+}
+
+// ---------------------------------------------------------------------------
+// quasiquote (Phase 4): マクロでコードを組み立てるための糖衣
+// ---------------------------------------------------------------------------
+
+/// `` `(a ~b ~@c) `` を `(concat (list (quote a)) (list b) c)` に変換する。
+fn quasiquote(form: &Value) -> Value {
+    match form {
+        Value::List(l) => {
+            if list::is_empty(l) {
+                return Value::List(None);
+            }
+            let items = list::to_vec(l);
+            // (unquote x) → x
+            if items.len() == 2 && matches!(&items[0], Value::Symbol(s) if s == "unquote") {
+                return items[1].clone();
+            }
+            // (concat (list ...) ...) を構築
+            let mut parts = vec![Value::Symbol("concat".to_string())];
+            for item in &items {
+                let Value::List(il) = item else {
+                    parts.push(list_of(vec![
+                        Value::Symbol("list".to_string()),
+                        quasiquote(item),
+                    ]));
+                    continue;
+                };
+                let ii = list::to_vec(il);
+                if ii.len() == 2 && matches!(&ii[0], Value::Symbol(s) if s == "unquote") {
+                    parts.push(list_of(vec![Value::Symbol("list".to_string()), ii[1].clone()]));
+                } else if ii.len() == 2 && matches!(&ii[0], Value::Symbol(s) if s == "unquote-splicing") {
+                    parts.push(ii[1].clone());
+                } else {
+                    parts.push(list_of(vec![
+                        Value::Symbol("list".to_string()),
+                        quasiquote(item),
+                    ]));
+                }
+            }
+            list_of(parts)
+        }
+        Value::Vector(v) => {
+            let inner = quasiquote(&Value::List(list::from_vec(v.to_vec())));
+            list_of(vec![Value::Symbol("vec".to_string()), inner])
+        }
+        Value::Map(m) => {
+            let mut flat = Vec::new();
+            for (k, v) in m.to_vec() {
+                flat.push(k);
+                flat.push(v);
+            }
+            let inner = quasiquote(&Value::List(list::from_vec(flat)));
+            list_of(vec![
+                Value::Symbol("apply".to_string()),
+                Value::Symbol("hash-map".to_string()),
+                inner,
+            ])
+        }
+        Value::Set(s) => {
+            let inner = quasiquote(&Value::List(list::from_vec(s.to_vec())));
+            list_of(vec![
+                Value::Symbol("apply".to_string()),
+                Value::Symbol("set".to_string()),
+                inner,
+            ])
+        }
+        // 原子は quote で包む
+        _ => list_of(vec![Value::Symbol("quote".to_string()), form.clone()]),
+    }
+}
+
+fn list_of(v: Vec<Value>) -> Value {
+    Value::List(list::from_vec(v))
+}
+
+// ---------------------------------------------------------------------------
+// try / catch / finally (Phase 4)
+// ---------------------------------------------------------------------------
+
+/// `(try body... (catch e body...)? (finally body...)?)` を評価する。
+/// catch のエラー変数には `{:message ... :kind ...}` のマップを束縛する。
+fn eval_try(env: &Arc<Env>, forms: &[Value], tail: bool) -> Result<Value, EvalErr> {
+    let mut end = forms.len();
+    let mut finally: Option<Vec<Value>> = None;
+    let mut catch: Option<(String, Vec<Value>)> = None;
+    // 末尾から (catch ...) / (finally ...) を取り出す (順序はどちらでもよい)
+    while end > 0 {
+        let Some((kind, items)) = extract_try_clause(&forms[end - 1]) else {
+            break;
+        };
+        match kind {
+            "catch" if catch.is_none() => {
+                if items.len() < 2 {
+                    return Err(MalError::syntax("catch にはエラー変数と body が必要です").into());
+                }
+                let Value::Symbol(sym) = &items[1] else {
+                    return Err(MalError::syntax("catch の第 1 引数はシンボルである必要があります").into());
+                };
+                catch = Some((sym.clone(), items[2..].to_vec()));
+                end -= 1;
+            }
+            "finally" if finally.is_none() => {
+                finally = Some(items[1..].to_vec());
+                end -= 1;
+            }
+            _ => break,
+        }
+        if catch.is_some() && finally.is_some() {
+            break;
+        }
+    }
+    let body = &forms[..end];
+    match eval_body(env, body, tail) {
+        Ok(v) => {
+            if let Some(fb) = &finally {
+                let _ = eval_body(env, fb, false);
+            }
+            Ok(v)
+        }
+        Err(EvalErr::Mal(e)) => {
+            if let Some((sym, cb)) = &catch {
+                let err_value = error_to_value(&e);
+                let child = Env::child(env);
+                child.set(sym.clone(), err_value);
+                let r = eval_body(&child, cb, tail);
+                if let Some(fb) = &finally {
+                    let _ = eval_body(env, fb, false);
+                }
+                r
+            } else {
+                if let Some(fb) = &finally {
+                    let _ = eval_body(env, fb, false);
+                }
+                Err(EvalErr::Mal(e))
+            }
+        }
+        Err(e) => {
+            // recur 制御フローは catch できないが finally は実行する
+            if let Some(fb) = &finally {
+                let _ = eval_body(env, fb, false);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// (catch ...) / (finally ...) の形なら (種別, 要素) を返す。
+fn extract_try_clause(form: &Value) -> Option<(&'static str, Vec<Value>)> {
+    let Value::List(l) = form else {
+        return None;
+    };
+    let items = list::to_vec(l);
+    let Value::Symbol(s) = items.first()? else {
+        return None;
+    };
+    match s.as_str() {
+        "catch" => Some(("catch", items)),
+        "finally" => Some(("finally", items)),
+        _ => None,
+    }
+}
+
+/// エラーを catch に束縛するマップ値に変換する。
+fn error_to_value(e: &MalError) -> Value {
+    let m = PHam::empty()
+        .assoc(Value::Keyword("message".to_string()), Value::Str(e.message.clone()))
+        .assoc(Value::Keyword("kind".to_string()), Value::Keyword(e.kind.name().to_string()));
+    Value::Map(Arc::new(m))
+}
+
 /// body を暗黙の `do` として評価する。最後の式だけ `tail` を引き継ぐ。
 fn eval_body(env: &Arc<Env>, body: &[Value], tail: bool) -> Result<Value, EvalErr> {
     if body.is_empty() {
@@ -381,9 +680,33 @@ pub fn eval_body_pub(env: &Arc<Env>, body: &[Value], tail: bool) -> Result<Value
 /// 関数を引数に適用する。
 pub fn apply(f: &Value, args: &[Value]) -> Result<Value, MalError> {
     match f {
+        // メタデータは透過 (meta / with-meta 以外は組み込み関数にメタを見せない)
+        Value::WithMeta(w) => apply(&w.value, args),
+        // キーワードは関数としてマップの検索に使える (Clojure 準拠): (:k m)
+        Value::Keyword(k) => {
+            if args.is_empty() {
+                return Err(MalError::arity("キーワード関数には引数が必要です"));
+            }
+            let key = Value::Keyword(k.clone());
+            match &args[0] {
+                Value::Nil => Ok(Value::Nil),
+                Value::Map(m) => Ok(m.get(&key).unwrap_or(Value::Nil)),
+                _ => Err(MalError::type_err("キーワード関数の第 1 引数はマップです")),
+            }
+        }
         Value::MalFn(mf) => match &**mf {
-            MalFn::Builtin { func, .. } => func(args),
+            MalFn::Builtin { name, func } => {
+                if *name == "meta" {
+                    // meta だけは生の値 (メタ付き) を見る必要がある
+                    func(args)
+                } else {
+                    func(&strip_args(args))
+                }
+            }
             MalFn::User(uf) => apply_user(uf, args),
+            MalFn::Macro(_) => {
+                Err(MalError::syntax("マクロを関数として適用できません (defmacro は展開専用です)"))
+            }
             MalFn::Partial { f, fixed } => {
                 let mut all = fixed.clone();
                 all.extend_from_slice(args);
@@ -406,6 +729,11 @@ pub fn apply(f: &Value, args: &[Value]) -> Result<Value, MalError> {
         },
         _ => Err(MalError::type_err(format!("関数ではありません: {}", pr_str(f)))),
     }
+}
+
+/// 組み込み関数に渡す引数のメタデータを剥がす。
+fn strip_args(args: &[Value]) -> Vec<Value> {
+    args.iter().map(|a| strip_meta(a).clone()).collect()
 }
 
 /// ユーザー定義関数の適用。fn 本体は末尾位置扱いで評価し、

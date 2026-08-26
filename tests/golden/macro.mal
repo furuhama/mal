@@ -1,0 +1,32 @@
+; defmacro と quasiquote (SPEC Phase 4)
+
+; --- unless: quasiquote + unquote + unquote-splicing ---
+(defmacro unless [c & body]
+  `(if (not ~c) (do ~@body) nil))
+(println (unless false 1 2 3))
+(println (unless true 1))
+(println (macroexpand-1 (unless false 1 2)))
+
+; --- infix: 演算子をオペレータ位置に ---
+(defmacro infix [a op b] `(~op ~a ~b))
+(println (infix 1 + 2))
+(println (infix 10 - 3))
+(println (infix 2 * 4))
+
+; --- inc2 ---
+(defmacro inc2 [x] `(+ ~x 2))
+(println (inc2 10))
+
+; --- quasiquote でのベクタ構築 ---
+(defmacro make-pair [a b] `[~a ~b])
+(println (make-pair 1 2))
+(println (first (make-pair 1 2)))
+
+; --- list で直接構築するマクロ ---
+(defmacro twice [x] (list '+ x x))
+(println (twice 5))
+
+; --- マクロは関数として適用できない ---
+(defmacro m1 [] 1)
+(println (try (m1) (catch e 0)))       ; 展開されるので 1
+(println (try (map m1 [1]) (catch e (:kind e))))  ; 関数適用はエラー

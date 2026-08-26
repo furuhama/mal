@@ -163,33 +163,63 @@ thread_local! { static TX: RefCell<Option<Rc<Transaction>>>; } // スレッド�
 - `std::thread::spawn` で body を評価。結果は `Mutex<Option<Result<Value, MalError>>>` +
   `Condvar` で保持し、`deref` がブロックして結果 (またはエラーの再送出) を返す。
 
-## 7. テスト
+## 7. Phase 4 (マクロ・メタデータ・例外) — 実装済み
+
+### 7.1 マクロ
+
+- `MalFn::Macro(Arc<UserFn>)`: `defn` と同じ構造。呼び出し時 (`eval_list`) に
+  特殊形式チェックの後、先頭シンボルがマクロに束縛されていれば**未評価の引数**で
+  `apply_user` し、展開結果を同じ `tail` フラグで再評価する。
+- `macroexpand` / `macroexpand-1`: 展開結果の確認用 (特殊形式)。
+- **quasiquote** (`\`` / `~` / `~@`): リーダーで `(quasiquote ...)` に展開し、
+  評価器が `(concat (list (quote a)) (list b) c...)` の形のコードを生成して
+  その場で評価する。unquote 部分はマクロの環境で解決される。
+- 非ハイジーン (シンボル捕捉の可能性あり) であることをドキュメント化。
+
+### 7.2 メタデータ
+
+- `Value::WithMeta(Arc<WithMetaValue>)` の透過ラッパ。`meta` / `with-meta` で操作。
+- **透過性の実装**:
+  - `values_equal` / `pr_str` / `hash_value` / `truthy` がラッパを剥がす
+  - `apply` が組み込み関数呼び出し時に `strip_args` で剥がす (例外的に `meta` だけ生の値を見る)
+  - ユーザー関数にはメタ付きの値が渡る (Clojure 準拠)
+- `defn` / `defmacro` のドキュメント文字列は `:doc` メタデータになる。
+
+### 7.3 try / catch / finally
+
+- `eval_try`: 末尾の `(catch ...)` / `(finally ...)` を切り出し、body 評価のエラーを
+  捕捉する。`e` には `{:message ... :kind ...}` のマップを束縛。
+- `(throw x)`: `ErrorKind::User` のエラーを返す組み込み関数。
+- 副産物としてキーワードの関数適用 (`(:k m)`) を `apply` に追加。
+
+## 8. テスト
 
 - `tests/golden/*.mal` + 期待 stdout のゴールデンテスト（テストハーネスを自作）。
 - STM ストレステスト: スレッド 8 本 × 振込 1000 回 → 「総額不変・残高非負」を assert。
 - `cargo test` で全部回ることを CI 相当の基準とする。
 
-## 8. ディレクトリ構成（予定）
+## 9. ディレクトリ構成
 
 ```
 mal/
 ├── SPEC.md              # サブセット仕様
-├── docs/
-│   ├── design.md        # 本メモ
-│   ├── core-functions.md# コア関数の詳細シグネチャ
-│   └── known-limitations.md
+├── docs/design.md       # 本メモ
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs          # REPL / ファイル実行
-│   ├── types.rs         # Value と等価性・表示
+│   ├── lib.rs           # モジュール宣言
+│   ├── types.rs         # Value と等価性・表示・エラー
 │   ├── reader.rs
 │   ├── printer.rs
 │   ├── env.rs
-│   ├── eval.rs
+│   ├── eval.rs          # 評価器・特殊形式・マクロ展開
 │   ├── core.rs          # 組み込み関数
 │   ├── persistent.rs    # Phase 2: 永続データ構造
 │   └── stm.rs           # Phase 3: atom / ref / トランザクション
+├── examples/bench.rs    # Phase 2 のベンチマーク
+├── demos/               # STM / マクロのデモ (.mal)
 └── tests/
-    ├── golden/
-    └── stm_stress.rs
+    ├── golden.rs        # ゴールデンテストハーネス
+    ├── golden/          # *.mal + *.expected
+    └── stm.rs           # 並行ストレステスト
 ```

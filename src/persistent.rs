@@ -585,6 +585,7 @@ pub fn hash_value(v: &Value) -> u64 {
         Value::Atom(a) => mix64(Arc::as_ptr(a) as usize as u64),
         Value::Ref(r) => mix64(Arc::as_ptr(r) as usize as u64),
         Value::Future(f) => mix64(Arc::as_ptr(f) as usize as u64),
+        Value::WithMeta(w) => hash_value(&w.value),
     }
 }
 

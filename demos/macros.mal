@@ -1,0 +1,41 @@
+;; マクロのデモ (SPEC Phase 4)
+;;
+;; 実行: cargo run -- demos/macros.mal
+
+;; --- unless: 条件が偽のときだけ body を実行 ---
+(defmacro unless [c & body]
+  `(if (not ~c) (do ~@body) nil))
+
+(unless false (println "unless: 偽なので実行"))
+(unless true  (println "unless: 真なのでスキップ"))
+
+;; --- infix: 中置記法 ---
+(defmacro infix [a op b] `(~op ~a ~b))
+(println "infix 1 + 2 =" (infix 1 + 2))
+
+;; --- my-when: 標準の when をマクロで再現 ---
+(defmacro my-when [c & body]
+  `(if ~c (do ~@body) nil))
+
+(println "my-when:"
+         (my-when true 1 2 3)
+         (my-when false 1))
+
+;; --- データ駆動: マクロはコードを生成する関数 ---
+(defmacro make-getter [key]
+  `(fn [m] (get m ~key)))
+
+(def get-name (make-getter :name))
+(println "get-name:" (get-name {:name "mal" :version 1}))
+
+;; --- 再帰マクロ (展開時に自身を呼ぶ) ---
+(defmacro my-list [& xs]
+  (if (empty? xs)
+    ()
+    (list 'cons (first xs) (cons 'my-list (rest xs)))))
+
+(println "my-list:" (my-list 1 2 3))
+
+;; --- マクロの展開結果を確認 ---
+(println "展開:" (macroexpand-1 (infix 3 * 4)))
+(println "完了")
