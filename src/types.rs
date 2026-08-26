@@ -9,7 +9,7 @@
 use crate::env::Env;
 use crate::persistent::{ham_equal, set_equal, vector_equal};
 use std::fmt;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// Lisp の値。
 #[derive(Debug, Clone)]
@@ -21,18 +21,24 @@ pub enum Value {
     Str(String),
     Keyword(String),
     Symbol(String),
-    List(Option<Rc<ListCell>>),
-    Vector(Rc<crate::persistent::PVector>),
-    Map(Rc<crate::persistent::PHam>),
-    Set(Rc<crate::persistent::PSet>),
-    MalFn(Rc<MalFn>),
+    List(Option<Arc<ListCell>>),
+    Vector(Arc<crate::persistent::PVector>),
+    Map(Arc<crate::persistent::PHam>),
+    Set(Arc<crate::persistent::PSet>),
+    MalFn(Arc<MalFn>),
+    /// identity (SPEC §8): 指す不変値を原子的に入れ替える。
+    Atom(Arc<crate::stm::Atom>),
+    /// トランザクション内でのみ変更できる参照 (SPEC §8.3)。
+    Ref(Arc<crate::stm::Ref>),
+    /// 別スレッドで実行される計算 (SPEC §8.4)。
+    Future(Arc<crate::stm::Future>),
 }
 
 /// リストの cons セル。`None` が空リスト。
 #[derive(Debug)]
 pub struct ListCell {
     pub head: Value,
-    pub tail: Option<Rc<ListCell>>,
+    pub tail: Option<Arc<ListCell>>,
 }
 
 /// リスト操作のヘルパ (Phase 2 より cons セル)。
@@ -40,16 +46,16 @@ pub mod list {
     use super::*;
 
     /// Vec から連結リストを構築する。
-    pub fn from_vec(v: Vec<Value>) -> Option<Rc<ListCell>> {
+    pub fn from_vec(v: Vec<Value>) -> Option<Arc<ListCell>> {
         let mut l = None;
         for x in v.into_iter().rev() {
-            l = Some(Rc::new(ListCell { head: x, tail: l }));
+            l = Some(Arc::new(ListCell { head: x, tail: l }));
         }
         l
     }
 
     /// 連結リストを Vec に変換する。
-    pub fn to_vec(l: &Option<Rc<ListCell>>) -> Vec<Value> {
+    pub fn to_vec(l: &Option<Arc<ListCell>>) -> Vec<Value> {
         let mut out = Vec::new();
         let mut cur = l.as_ref();
         while let Some(cell) = cur {
@@ -59,7 +65,7 @@ pub mod list {
         out
     }
 
-    pub fn len(l: &Option<Rc<ListCell>>) -> usize {
+    pub fn len(l: &Option<Arc<ListCell>>) -> usize {
         let mut n = 0;
         let mut cur = l.as_ref();
         while let Some(cell) = cur {
@@ -69,13 +75,13 @@ pub mod list {
         n
     }
 
-    pub fn is_empty(l: &Option<Rc<ListCell>>) -> bool {
+    pub fn is_empty(l: &Option<Arc<ListCell>>) -> bool {
         l.is_none()
     }
 
     /// 先頭に追加 (O(1))。
-    pub fn cons(head: Value, tail: Option<Rc<ListCell>>) -> Option<Rc<ListCell>> {
-        Some(Rc::new(ListCell { head, tail }))
+    pub fn cons(head: Value, tail: Option<Arc<ListCell>>) -> Option<Arc<ListCell>> {
+        Some(Arc::new(ListCell { head, tail }))
     }
 }
 
@@ -88,7 +94,7 @@ pub enum MalFn {
         func: fn(&[Value]) -> Result<Value, MalError>,
     },
     /// ユーザー定義関数 (クロージャ)。
-    User(Rc<UserFn>),
+    User(Arc<UserFn>),
     /// `partial` が生成する部分適用関数。
     Partial { f: Value, fixed: Vec<Value> },
     /// `comp` が生成する合成関数。
@@ -103,7 +109,7 @@ pub struct UserFn {
     pub params: Vec<String>,
     pub rest: Option<String>,
     pub body: Vec<Value>,
-    pub env: Rc<Env>,
+    pub env: Arc<Env>,
 }
 
 impl Value {
@@ -129,12 +135,15 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Vector(x), Value::Vector(y)) => vector_equal(x, y),
         (Value::Map(x), Value::Map(y)) => ham_equal(x, y),
         (Value::Set(x), Value::Set(y)) => set_equal(x, y),
-        (Value::MalFn(x), Value::MalFn(y)) => Rc::ptr_eq(x, y),
+        (Value::MalFn(x), Value::MalFn(y)) => Arc::ptr_eq(x, y),
+        (Value::Atom(x), Value::Atom(y)) => Arc::ptr_eq(x, y),
+        (Value::Ref(x), Value::Ref(y)) => Arc::ptr_eq(x, y),
+        (Value::Future(x), Value::Future(y)) => Arc::ptr_eq(x, y),
         _ => false,
     }
 }
 
-fn list_equal(a: &Option<Rc<ListCell>>, b: &Option<Rc<ListCell>>) -> bool {
+fn list_equal(a: &Option<Arc<ListCell>>, b: &Option<Arc<ListCell>>) -> bool {
     let mut ca = a.as_ref();
     let mut cb = b.as_ref();
     loop {
@@ -187,7 +196,7 @@ impl fmt::Display for ErrorKind {
 
 /// 言語エラー。`eof` は「入力が途中で終わった」ことを示す
 /// (REPL が続きの行を読むためのヒント)。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MalError {
     pub kind: ErrorKind,
     pub message: String,

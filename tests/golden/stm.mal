@@ -1,0 +1,58 @@
+; STM の基本動作 (SPEC §8)。並行性の検証は tests/stm.rs を参照。
+
+; --- Atom ---
+(def c (atom 0))
+(println @c)
+(swap! c inc)
+(println @c)
+(swap! c + 10 5)
+(println @c)
+(reset! c 100)
+(println @c)
+
+; --- Ref + dosync ---
+(def r (ref 0))
+(println @r)
+(dosync (ref-set r 5))
+(println @r)
+(dosync (alter r inc))
+(println @r)
+(dosync (commute r + 10))
+(println @r)
+(dosync (ref-set r 1) (ref-set r 2) (ref-set r 3))
+(println @r)
+
+; --- トランザクション内一貫性: 自分の書き込みが見える ---
+(dosync
+  (ref-set r 100)
+  (println "tx内の読み取り:" @r))
+(println @r)
+
+; --- 読み取り → 書き込み (検証の対象になるパターン) ---
+(defn bump [n]
+  (dosync
+    (loop [i 0]
+      (if (< i n)
+        (do (alter r inc) (recur (inc i)))
+        r))))
+(bump 5)
+(println @r)
+
+; --- ensure ---
+(dosync (println "ensure した値:" (ensure r)))
+
+; --- future ---
+(def f (future (do (println "future 開始") (+ 40 2))))
+(println "future の結果:" @f)
+
+; --- future 内から dosync も使える ---
+(def rf (ref 0))
+(def f2 (future (dosync (alter rf + 7))))
+@f2
+(println "future 内の dosync:" @rf)
+
+; --- ネストした dosync は同じトランザクションに統合 ---
+(dosync
+  (ref-set r 1)
+  (dosync (alter r + 1)))
+(println "ネスト dosync:" @r)

@@ -1,7 +1,7 @@
 //! REPL / ファイル実行 (SPEC §10)。
 
 use std::io::Write;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use mal::env::Env;
 use mal::types::Value;
@@ -19,7 +19,7 @@ fn main() {
     }
 }
 
-fn repl(env: &Rc<Env>) {
+fn repl(env: &Arc<Env>) {
     let stdin = std::io::stdin();
     let mut buffer = String::new();
     let mut line = String::new();
@@ -70,7 +70,7 @@ fn is_exit(form: &Value) -> bool {
         && l.as_ref().unwrap().tail.is_none())
 }
 
-fn run_file(env: &Rc<Env>, path: &str) {
+fn run_file(env: &Arc<Env>, path: &str) {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {

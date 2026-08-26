@@ -13,20 +13,21 @@ pub enum Value {
     Str(String),
     Keyword(String),
     Symbol(String),
-    List(Rc<List>),          // cons セル（連結リスト）
-    Vector(Rc<Vector>),      // Phase 1: Vec<Value> / Phase 2: 永続トライ
-    Map(Rc<Map>),            // Phase 1: Vec<(Value, Value)> / Phase 2: HAMT
-    Set(Rc<Set>),
-    Fn(Rc<Fn>),              // Builtin | User{params, body, env}
-    Atom(Rc<Atom>),
-    Ref(Rc<Ref>),
-    Future(Rc<Future>),
+    List(Option<Arc<ListCell>>), // cons セル（連結リスト）
+    Vector(Arc<PVector>),        // 永続トライ (Phase 2)
+    Map(Arc<PHam>),              // Array ≤ 8 → HAMT (Phase 2)
+    Set(Arc<PSet>),
+    MalFn(Arc<MalFn>),           // Builtin | User{params, body, env}
+    Atom(Arc<Atom>),             // Phase 3
+    Ref(Arc<Ref>),               // Phase 3
+    Future(Arc<Future>),         // Phase 3
 }
 ```
 
-- 共有は `Rc` で行う。**循環参照**（atom が自分自身を指す等）はリークする。学習プロジェクトとして許容し、`docs/known-limitations.md` に記録する。
+- 共有は `Arc` で行う (Phase 3 から `future` がスレッドを跨ぐため。`Rc` → `Arc` に移行済み)。
+  **循環参照**（atom が自分自身を指す等）はリークする。学習プロジェクトとして許容する。
 - キーワード・シンボルのインターン（`Symbol` テーブル）は後回し。まずは `String`。
-- 等価性: `=` は値の深い比較。`Int`/`Float` は数値として比較。関数・atom・ref・future は `Rc` ポインタの同一性で比較。
+- 等価性: `=` は値の深い比較。`Int`/`Float` は数値として比較。関数・atom・ref・future は `Arc` ポインタの同一性で比較。
 
 ## 2. 環境
 
@@ -111,43 +112,56 @@ enum TrieNode {
 
 `cargo run --release --example bench` で再計測できる。
 
-## 6. STM (Phase 3)
+## 6. STM (Phase 3) — 実装済み
+
+`src/stm.rs`。**前提**: Phase 3 から値はスレッドを跨ぐため、全共有構造を `Rc` → `Arc` に、
+`Env` の `RefCell` → `Mutex` に移行した (Value は Send + Sync)。
 
 ### 6.1 Ref / Atom の内部表現
 
 ```rust
 struct RefState { value: Value, version: u64 }
 struct Ref { state: Mutex<RefState> }
+struct Atom { state: Mutex<Value> } // swap! はロック内で関数適用
 ```
 
-- 検証は「トランザクション開始時に読んだバージョン」と「コミット時の現在バージョン」の比較で行う。
-- コミットは**グローバルロック**（`static COMMIT_LOCK: Mutex<()>`）で直列化する。シンプルで十分（学習目的）。
-- Atom は `Mutex<Value>` で保持し、`swap!` はロック内で関数を適用する（仕様の CAS ループと等価な原子的更新。詳細は実装時に再検討）。
+- 検証は「トランザクション中に読んだバージョン」と「コミット時の現在バージョン」の比較。
+- コミットは**グローバルロック** (`static COMMIT_LOCK: Mutex<()>`) で直列化。
+- コミット再入ガード: `thread_local IN_COMMIT` フラグで、alter の関数内からの
+  ネスト dosync (同一トランザクションに統合されるためロック再取得なし) による
+  デッドロックを防ぐ。
 
 ### 6.2 トランザクション
 
-- スレッドローカル（`thread_local!`）にトランザクションログを保持:
-
 ```rust
 struct Transaction {
-    read_set: Vec<(usize /* ref id */, u64 /* version */, bool /* ensured */)>,
-    write_set: Vec<Write>, // SetValue(Value) | Alter(Fn, Vec<Value>) | Commute(Fn, Vec<Value>)
+    reads: RefCell<Vec<(Arc<Ref>, ReadEntry)>>, // value / version / ensured をキャッシュ
+    writes: RefCell<Vec<Write>>,                // Set | Alter(f, args) | Commute(f, args)
 }
+thread_local! { static TX: RefCell<Option<Rc<Transaction>>>; } // スレッドローカル (Rc)
 ```
 
-- 読み取り: 現在値 + バージョンを read_set に記録（同一 ref の再読み取りは記録済みの値を返す → トランザクション内一貫性）。
-- 書き込み: write_set にステージ。実値には触れない。
-- コミット:
-  1. グローバルロック取得
-  2. read_set の各 ref の現在バージョンが記録と一致するか検証
-  3. 一致 → write_set を適用（`Alter`/`Commute` は現在値に関数を適用）、バージョン増加、ロック解放、成功
-  4. 不一致 → ロック解放、ログ破棄、トランザクション全体を再実行（上限 10000 回）
-- `ensure` は read_set に保護フラグを立てる（通常の読み取りと同様の検証で実現可能）。
-- `dosync` のネストは（Clojure と同様に）内側を外側のトランザクションに統合する。Phase 3 では「ネストは許容、同一トランザクションとして扱う」。
+- **読み取り** (`read_ref`): ①自分の write-set に一致があればその値 (トランザクションは自分の書き込みを見る)、
+  ②read-set のキャッシュ、③実値 + バージョンをキャッシュ。
+- **書き込み**: write-set にステージ。実値には触れない。
+- **コミット** (`run_dosync`):
+  1. COMMIT_LOCK 取得
+  2. read-set の各 ref の現在バージョンが記録と一致するか検証
+  3. 一致 → write-set を適用 (`Alter`/`Commute` は**コミット時の最新値**に関数を適用)、
+     バージョン増加、ロック解放、成功
+  4. 不一致 → ログ破棄、トランザクション全体を再実行 (上限 10000 回、超過はエラー)
+- **alter / commute は read-set に含めない** → 並行する書き込み同士は競合しない
+  (バンク振込が再試行嵐にならない)。読み取り (`deref`) と組み合わせた
+  「読み取り → 書き込み」パターンでのみ検証が効く。
+- `ensure` は read-set に記録する (通常の読み取りと同一の検証で実現)。
+- `dosync` のネストは同じトランザクションに統合される。
+- **注意**: トランザクションは再実行されうるため、`dosync` 内の副作用
+  (`println` / `atom` の更新) は複数回実行されうる。純粋なコードを書くこと。
 
 ### 6.3 Future
 
-- `std::thread::spawn` で実行。結果は `Mutex<Option<Result<Value, MalError>>>` + `Condvar` で `deref` まで保持する。
+- `std::thread::spawn` で body を評価。結果は `Mutex<Option<Result<Value, MalError>>>` +
+  `Condvar` で保持し、`deref` がブロックして結果 (またはエラーの再送出) を返す。
 
 ## 7. テスト
 

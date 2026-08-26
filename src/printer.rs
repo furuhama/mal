@@ -33,6 +33,9 @@ pub fn pr_str(v: &Value) -> String {
             MalFn::Builtin { name, .. } => format!("#<builtin {}>", name),
             _ => "#<fn>".to_string(),
         },
+        Value::Atom(_) => "#<atom>".to_string(),
+        Value::Ref(_) => "#<ref>".to_string(),
+        Value::Future(_) => "#<future>".to_string(),
     }
 }
 

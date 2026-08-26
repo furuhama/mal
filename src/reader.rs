@@ -3,7 +3,7 @@
 //! `'x` は `(quote x)`、`@x` は `(deref x)` の糖衣としてパーサ側で展開する。
 
 use crate::types::{MalError, Value};
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// トークン (テキストとバイト位置)。
 #[derive(Debug, Clone)]
@@ -145,9 +145,9 @@ impl Parser<'_> {
         let tok = self.next().ok_or_else(|| MalError::reader_eof("式が途中で終わっています"))?;
         match tok.text.as_str() {
             "(" => self.parse_seq(')', |v| Value::List(crate::types::list::from_vec(v))),
-            "[" => self.parse_seq(']', |v| Value::Vector(Rc::new(crate::persistent::PVector::from_vec(v)))),
+            "[" => self.parse_seq(']', |v| Value::Vector(Arc::new(crate::persistent::PVector::from_vec(v)))),
             "{" => self.parse_map(),
-            "#{" => self.parse_seq('}', |v| Value::Set(Rc::new(crate::persistent::PSet::from_vec(v)))),
+            "#{" => self.parse_seq('}', |v| Value::Set(Arc::new(crate::persistent::PSet::from_vec(v)))),
             ")" | "]" | "}" => Err(self.pos_err(&tok, "対応する開き括弧がありません")),
             "'" => self.parse_sugar(&tok, "quote"),
             "@" => self.parse_sugar(&tok, "deref"),
@@ -191,7 +191,7 @@ impl Parser<'_> {
                 None => return Err(MalError::reader_eof("対応する閉じ括弧がありません")),
                 Some(t) if t.text == "}" => {
                     self.next();
-                    return Ok(Value::Map(Rc::new(crate::persistent::PHam::from_vec(items))));
+                    return Ok(Value::Map(Arc::new(crate::persistent::PHam::from_vec(items))));
                 }
                 Some(t) if t.text == ")" || t.text == "]" => {
                     return Err(self.pos_err(t, "括弧の種類が一致しません"));

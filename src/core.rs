@@ -8,12 +8,12 @@ use crate::reader::read_str;
 use crate::types::{list, values_equal, MalError, MalFn, Value};
 use std::cmp::Ordering;
 use std::io::Write;
-use std::rc::Rc;
+use std::sync::Arc;
 
 type BuiltinFn = fn(&[Value]) -> Result<Value, MalError>;
 
 /// 組み込み関数をすべて束縛した環境を返す。
-pub fn default_env() -> Rc<Env> {
+pub fn default_env() -> Arc<Env> {
     let env = Env::new();
     const BUILTINS: &[(&str, BuiltinFn)] = &[
         // 算術
@@ -104,9 +104,19 @@ pub fn default_env() -> Rc<Env> {
         ("keyword", keyword),
         ("symbol", symbol),
         ("name", name),
+        // STM (Phase 3, SPEC §8)
+        ("atom", atom),
+        ("deref", deref),
+        ("swap!", swap_bang),
+        ("reset!", reset_bang),
+        ("ref", ref_fn),
+        ("ref-set", ref_set),
+        ("alter", alter),
+        ("commute", commute),
+        ("ensure", ensure),
     ];
     for &(bname, func) in BUILTINS.iter() {
-        env.set(bname.to_string(), Value::MalFn(Rc::new(MalFn::Builtin { name: bname, func })));
+        env.set(bname.to_string(), Value::MalFn(Arc::new(MalFn::Builtin { name: bname, func })));
     }
     env
 }
@@ -596,7 +606,7 @@ fn conj(args: &[Value]) -> Result<Value, MalError> {
             for x in items {
                 out = out.conj(x.clone());
             }
-            Ok(Value::Vector(Rc::new(out)))
+            Ok(Value::Vector(Arc::new(out)))
         }
         Value::Map(m) => {
             let mut out = (**m).clone();
@@ -609,14 +619,14 @@ fn conj(args: &[Value]) -> Result<Value, MalError> {
                 }
                 out = out.assoc(e.get(0).unwrap_or(Value::Nil), e.get(1).unwrap_or(Value::Nil));
             }
-            Ok(Value::Map(Rc::new(out)))
+            Ok(Value::Map(Arc::new(out)))
         }
         Value::Set(s) => {
             let mut out = (**s).clone();
             for x in items {
                 out = out.conj(x.clone());
             }
-            Ok(Value::Set(Rc::new(out)))
+            Ok(Value::Set(Arc::new(out)))
         }
         _ => Err(MalError::type_err("conj はコレクションを要求します")),
     }
@@ -697,7 +707,7 @@ fn nth(args: &[Value]) -> Result<Value, MalError> {
 // ---------------------------------------------------------------------------
 
 fn vector(args: &[Value]) -> Result<Value, MalError> {
-    Ok(Value::Vector(Rc::new(PVector::from_vec(args.to_vec()))))
+    Ok(Value::Vector(Arc::new(PVector::from_vec(args.to_vec()))))
 }
 
 fn vec(args: &[Value]) -> Result<Value, MalError> {
@@ -705,9 +715,9 @@ fn vec(args: &[Value]) -> Result<Value, MalError> {
         return Err(MalError::arity("vec は 1 引数です"));
     }
     match &args[0] {
-        Value::Nil => Ok(Value::Vector(Rc::new(PVector::empty()))),
-        Value::List(l) => Ok(Value::Vector(Rc::new(PVector::from_vec(list::to_vec(l))))),
-        Value::Vector(v) => Ok(Value::Vector(Rc::clone(v))),
+        Value::Nil => Ok(Value::Vector(Arc::new(PVector::empty()))),
+        Value::List(l) => Ok(Value::Vector(Arc::new(PVector::from_vec(list::to_vec(l))))),
+        Value::Vector(v) => Ok(Value::Vector(Arc::clone(v))),
         _ => Err(MalError::type_err("vec はリスト・ベクタにのみ対応します")),
     }
 }
@@ -726,7 +736,7 @@ fn hash_map(args: &[Value]) -> Result<Value, MalError> {
         pairs.push((args[i].clone(), args[i + 1].clone()));
         i += 2;
     }
-    Ok(Value::Map(Rc::new(PHam::from_vec(pairs))))
+    Ok(Value::Map(Arc::new(PHam::from_vec(pairs))))
 }
 
 fn get(args: &[Value]) -> Result<Value, MalError> {
@@ -762,7 +772,7 @@ fn assoc(args: &[Value]) -> Result<Value, MalError> {
         out = out.assoc(args[i].clone(), args[i + 1].clone());
         i += 2;
     }
-    Ok(Value::Map(Rc::new(out)))
+    Ok(Value::Map(Arc::new(out)))
 }
 
 fn dissoc(args: &[Value]) -> Result<Value, MalError> {
@@ -776,7 +786,7 @@ fn dissoc(args: &[Value]) -> Result<Value, MalError> {
     for k in &args[1..] {
         out = out.dissoc(k);
     }
-    Ok(Value::Map(Rc::new(out)))
+    Ok(Value::Map(Arc::new(out)))
 }
 
 fn contains(args: &[Value]) -> Result<Value, MalError> {
@@ -824,7 +834,7 @@ fn merge(args: &[Value]) -> Result<Value, MalError> {
             out = out.assoc(k, v);
         }
     }
-    Ok(Value::Map(Rc::new(out)))
+    Ok(Value::Map(Arc::new(out)))
 }
 
 // ---------------------------------------------------------------------------
@@ -841,7 +851,7 @@ fn set(args: &[Value]) -> Result<Value, MalError> {
         Value::Vector(v) => v.to_vec(),
         _ => return Err(MalError::type_err("set はリスト・ベクタにのみ対応します")),
     };
-    Ok(Value::Set(Rc::new(PSet::from_vec(elems))))
+    Ok(Value::Set(Arc::new(PSet::from_vec(elems))))
 }
 
 fn disj(args: &[Value]) -> Result<Value, MalError> {
@@ -855,7 +865,7 @@ fn disj(args: &[Value]) -> Result<Value, MalError> {
     for e in &args[1..] {
         out = out.disj(e);
     }
-    Ok(Value::Set(Rc::new(out)))
+    Ok(Value::Set(Arc::new(out)))
 }
 
 // ---------------------------------------------------------------------------
@@ -937,11 +947,11 @@ fn partial(args: &[Value]) -> Result<Value, MalError> {
     if !matches!(args[0], Value::MalFn(_)) {
         return Err(MalError::type_err("partial の第 1 引数は関数です"));
     }
-    Ok(Value::MalFn(Rc::new(MalFn::Partial { f: args[0].clone(), fixed: args[1..].to_vec() })))
+    Ok(Value::MalFn(Arc::new(MalFn::Partial { f: args[0].clone(), fixed: args[1..].to_vec() })))
 }
 
 fn comp(args: &[Value]) -> Result<Value, MalError> {
-    Ok(Value::MalFn(Rc::new(MalFn::Comp { fns: args.to_vec() })))
+    Ok(Value::MalFn(Arc::new(MalFn::Comp { fns: args.to_vec() })))
 }
 
 fn identity(args: &[Value]) -> Result<Value, MalError> {
@@ -955,7 +965,7 @@ fn constantly(args: &[Value]) -> Result<Value, MalError> {
     if args.len() != 1 {
         return Err(MalError::arity("constantly は 1 引数です"));
     }
-    Ok(Value::MalFn(Rc::new(MalFn::Constantly(args[0].clone()))))
+    Ok(Value::MalFn(Arc::new(MalFn::Constantly(args[0].clone()))))
 }
 
 // ---------------------------------------------------------------------------
@@ -1062,4 +1072,104 @@ fn name(args: &[Value]) -> Result<Value, MalError> {
         Value::Keyword(s) | Value::Symbol(s) => Ok(Value::Str(s.clone())),
         _ => Err(MalError::type_err("name はキーワード・シンボルを要求します")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// STM (SPEC §8)
+// ---------------------------------------------------------------------------
+
+fn atom(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() != 1 {
+        return Err(MalError::arity("atom は 1 引数です"));
+    }
+    Ok(Value::Atom(crate::stm::Atom::new(args[0].clone())))
+}
+
+fn deref(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() != 1 {
+        return Err(MalError::arity("deref は 1 引数です"));
+    }
+    match &args[0] {
+        Value::Atom(a) => Ok(a.deref()),
+        Value::Ref(r) => r.read(false),
+        Value::Future(f) => f.deref(),
+        _ => Err(MalError::type_err("deref は atom・ref・future にのみ対応します")),
+    }
+}
+
+fn swap_bang(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() < 2 {
+        return Err(MalError::arity("swap! は (swap! atom f & args) の形です"));
+    }
+    let Value::Atom(a) = &args[0] else {
+        return Err(MalError::type_err("swap! の第 1 引数は atom です"));
+    };
+    if !matches!(args[1], Value::MalFn(_)) {
+        return Err(MalError::type_err("swap! の第 2 引数は関数です"));
+    }
+    a.swap(&args[1], &args[2..])
+}
+
+fn reset_bang(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() != 2 {
+        return Err(MalError::arity("reset! は (reset! atom x) の形です"));
+    }
+    let Value::Atom(a) = &args[0] else {
+        return Err(MalError::type_err("reset! の第 1 引数は atom です"));
+    };
+    Ok(a.reset(&args[1]))
+}
+
+fn ref_fn(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() != 1 {
+        return Err(MalError::arity("ref は 1 引数です"));
+    }
+    Ok(Value::Ref(crate::stm::Ref::new(args[0].clone())))
+}
+
+fn ref_set(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() != 2 {
+        return Err(MalError::arity("ref-set は (ref-set ref x) の形です"));
+    }
+    let Value::Ref(r) = &args[0] else {
+        return Err(MalError::type_err("ref-set の第 1 引数は ref です"));
+    };
+    r.ref_set(args[1].clone())?;
+    Ok(args[1].clone())
+}
+
+fn alter(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() < 2 {
+        return Err(MalError::arity("alter は (alter ref f & args) の形です"));
+    }
+    let Value::Ref(r) = &args[0] else {
+        return Err(MalError::type_err("alter の第 1 引数は ref です"));
+    };
+    if !matches!(args[1], Value::MalFn(_)) {
+        return Err(MalError::type_err("alter の第 2 引数は関数です"));
+    }
+    r.alter(&args[1], &args[2..])
+}
+
+fn commute(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() < 2 {
+        return Err(MalError::arity("commute は (commute ref f & args) の形です"));
+    }
+    let Value::Ref(r) = &args[0] else {
+        return Err(MalError::type_err("commute の第 1 引数は ref です"));
+    };
+    if !matches!(args[1], Value::MalFn(_)) {
+        return Err(MalError::type_err("commute の第 2 引数は関数です"));
+    }
+    r.commute(&args[1], &args[2..])
+}
+
+fn ensure(args: &[Value]) -> Result<Value, MalError> {
+    if args.len() != 1 {
+        return Err(MalError::arity("ensure は 1 引数です"));
+    }
+    let Value::Ref(r) = &args[0] else {
+        return Err(MalError::type_err("ensure の引数は ref です"));
+    };
+    r.read(true)
 }

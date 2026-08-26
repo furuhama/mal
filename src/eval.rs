@@ -8,7 +8,7 @@ use crate::env::Env;
 use crate::persistent::{PHam, PSet, PVector};
 use crate::printer::pr_str;
 use crate::types::{list, MalError, MalFn, UserFn, Value};
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// 評価エラー: 言語エラーと、loop/recur の制御フロー。
@@ -25,7 +25,7 @@ impl From<MalError> for EvalErr {
 
 /// トップレベル評価 (REPL / ファイル実行が使う)。
 /// ここまで逃げてきた `recur` はエラーにする。
-pub fn eval_top(env: &Rc<Env>, form: &Value) -> Result<Value, MalError> {
+pub fn eval_top(env: &Arc<Env>, form: &Value) -> Result<Value, MalError> {
     match eval(env, form, false) {
         Ok(v) => Ok(v),
         Err(EvalErr::Mal(e)) => Err(e),
@@ -34,7 +34,7 @@ pub fn eval_top(env: &Rc<Env>, form: &Value) -> Result<Value, MalError> {
 }
 
 /// 評価。`tail` は「この式が末尾位置にあるか」を表す (recur の合法性判定)。
-pub fn eval(env: &Rc<Env>, form: &Value, tail: bool) -> Result<Value, EvalErr> {
+pub fn eval(env: &Arc<Env>, form: &Value, tail: bool) -> Result<Value, EvalErr> {
     match form {
         Value::Symbol(name) => env.get(name).ok_or_else(|| MalError::unbound(name).into()),
         Value::List(list) => eval_list(env, list, tail),
@@ -44,28 +44,28 @@ pub fn eval(env: &Rc<Env>, form: &Value, tail: bool) -> Result<Value, EvalErr> {
             for e in vec.to_vec() {
                 out = out.conj(eval(env, &e, false)?);
             }
-            Ok(Value::Vector(Rc::new(out)))
+            Ok(Value::Vector(Arc::new(out)))
         }
         Value::Map(map) => {
             let mut out = PHam::empty();
             for (k, v) in map.to_vec() {
                 out = out.assoc(eval(env, &k, false)?, eval(env, &v, false)?);
             }
-            Ok(Value::Map(Rc::new(out)))
+            Ok(Value::Map(Arc::new(out)))
         }
         Value::Set(set) => {
             let mut out = PSet::empty();
             for e in set.to_vec() {
                 out = out.conj(eval(env, &e, false)?);
             }
-            Ok(Value::Set(Rc::new(out)))
+            Ok(Value::Set(Arc::new(out)))
         }
         // 残り (nil / 真偽値 / 数値 / 文字列 / キーワード / 関数) は自己評価
         _ => Ok(form.clone()),
     }
 }
 
-fn eval_list(env: &Rc<Env>, list: &Option<Rc<crate::types::ListCell>>, tail: bool) -> Result<Value, EvalErr> {
+fn eval_list(env: &Arc<Env>, list: &Option<Arc<crate::types::ListCell>>, tail: bool) -> Result<Value, EvalErr> {
     let Some(head_cell) = list else {
         // 空リストは自分自身に評価される (Clojure 準拠)
         return Ok(Value::List(None));
@@ -88,12 +88,12 @@ fn eval_list(env: &Rc<Env>, list: &Option<Rc<crate::types::ListCell>>, tail: boo
 fn special_form(name: &str) -> Option<&str> {
     match name {
         "def" | "fn" | "defn" | "let" | "if" | "do" | "quote" | "and" | "or" | "cond" | "when"
-        | "loop" | "recur" | "time" => Some(name),
+        | "loop" | "recur" | "time" | "dosync" | "future" => Some(name),
         _ => None,
     }
 }
 
-fn eval_special(env: &Rc<Env>, name: &str, list: &[Value], tail: bool) -> Result<Value, EvalErr> {
+fn eval_special(env: &Arc<Env>, name: &str, list: &[Value], tail: bool) -> Result<Value, EvalErr> {
     match name {
         "def" => {
             if list.len() != 3 {
@@ -112,11 +112,11 @@ fn eval_special(env: &Rc<Env>, name: &str, list: &[Value], tail: bool) -> Result
             }
             let (params, rest) = parse_params(&list[1])?;
             let body = list[2..].to_vec();
-            Ok(Value::MalFn(Rc::new(MalFn::User(Rc::new(UserFn {
+            Ok(Value::MalFn(Arc::new(MalFn::User(Arc::new(UserFn {
                 params,
                 rest,
                 body,
-                env: Rc::clone(env),
+                env: Arc::clone(env),
             })))))
         }
         "defn" => {
@@ -128,11 +128,11 @@ fn eval_special(env: &Rc<Env>, name: &str, list: &[Value], tail: bool) -> Result
             };
             let (params, rest) = parse_params(&list[2])?;
             let body = list[3..].to_vec();
-            let f = Value::MalFn(Rc::new(MalFn::User(Rc::new(UserFn {
+            let f = Value::MalFn(Arc::new(MalFn::User(Arc::new(UserFn {
                 params,
                 rest,
                 body,
-                env: Rc::clone(env),
+                env: Arc::clone(env),
             }))));
             env.set(name_sym.clone(), f);
             Ok(Value::Symbol(name_sym.clone()))
@@ -311,6 +311,21 @@ fn eval_special(env: &Rc<Env>, name: &str, list: &[Value], tail: bool) -> Result
             println!("Elapsed time: {:.3} msecs", t0.elapsed().as_secs_f64() * 1000.0);
             Ok(v)
         }
+        "dosync" => {
+            if list.len() < 2 {
+                return Err(MalError::arity("dosync には body が必要です").into());
+            }
+            crate::stm::run_dosync(env, &list[1..]).map_err(EvalErr::Mal)
+        }
+        "future" => {
+            if list.len() < 2 {
+                return Err(MalError::arity("future には body が必要です").into());
+            }
+            Ok(Value::Future(crate::stm::Future::spawn(
+                Arc::clone(env),
+                list[1..].to_vec(),
+            )))
+        }
         _ => Err(MalError::internal(format!("未知の特殊形式: {}", name)).into()),
     }
 }
@@ -348,7 +363,7 @@ fn parse_params(form: &Value) -> Result<(Vec<String>, Option<String>), MalError>
 }
 
 /// body を暗黙の `do` として評価する。最後の式だけ `tail` を引き継ぐ。
-fn eval_body(env: &Rc<Env>, body: &[Value], tail: bool) -> Result<Value, EvalErr> {
+fn eval_body(env: &Arc<Env>, body: &[Value], tail: bool) -> Result<Value, EvalErr> {
     if body.is_empty() {
         return Ok(Value::Nil);
     }
@@ -356,6 +371,11 @@ fn eval_body(env: &Rc<Env>, body: &[Value], tail: bool) -> Result<Value, EvalErr
         eval(env, f, false)?;
     }
     eval(env, &body[body.len() - 1], tail)
+}
+
+/// stm モジュール (dosync / future) から使うための公開ラッパ。
+pub fn eval_body_pub(env: &Arc<Env>, body: &[Value], tail: bool) -> Result<Value, EvalErr> {
+    eval_body(env, body, tail)
 }
 
 /// 関数を引数に適用する。
@@ -404,7 +424,7 @@ fn apply_user(uf: &UserFn, args: &[Value]) -> Result<Value, MalError> {
 }
 
 /// arity を検証し、パラメータを束縛した呼び出し環境を返す。
-fn bind_env(uf: &UserFn, args: &[Value]) -> Result<Rc<Env>, MalError> {
+fn bind_env(uf: &UserFn, args: &[Value]) -> Result<Arc<Env>, MalError> {
     match &uf.rest {
         None if args.len() != uf.params.len() => {
             return Err(MalError::arity(format!(

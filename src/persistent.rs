@@ -8,7 +8,7 @@
 //! - リストは cons セル (単方向連結リスト)。`types::list` 参照。
 
 use crate::types::{list, values_equal, Value};
-use std::rc::Rc;
+use std::sync::Arc;
 
 const BRANCH: usize = 32;
 const SHIFT_BITS: u32 = 5;
@@ -21,20 +21,20 @@ const MASK: u32 = 31;
 #[derive(Debug)]
 enum Node {
     /// 非葉ノード。常に 32 スロット (子ノードへの Option)。
-    Branch(Vec<Option<Rc<Node>>>),
+    Branch(Vec<Option<Arc<Node>>>),
     /// 葉ノード。常に 32 スロット (値)。
     Leaf(Vec<Value>),
 }
 
 #[derive(Debug, Clone)]
 pub struct PVector {
-    root: Option<Rc<Node>>,
+    root: Option<Arc<Node>>,
     tail: Vec<Value>, // 末尾の最大 32 要素
     shift: u32,       // ルート直下のシフト量 (5 の倍数)
     len: usize,
 }
 
-fn empty_branch() -> Vec<Option<Rc<Node>>> {
+fn empty_branch() -> Vec<Option<Arc<Node>>> {
     let mut v = Vec::with_capacity(BRANCH);
     v.resize(BRANCH, None);
     v
@@ -70,7 +70,7 @@ impl PVector {
         if i >= tail_start {
             return self.tail.get(i - tail_start).cloned();
         }
-        let mut node: &Rc<Node> = self.root.as_ref()?;
+        let mut node: &Arc<Node> = self.root.as_ref()?;
         let mut shift = self.shift;
         while shift > 0 {
             let slot = ((i as u32 >> shift) & MASK) as usize;
@@ -97,17 +97,17 @@ impl PVector {
         let idx = self.len - BRANCH;
         let (root, shift) = match &self.root {
             None => {
-                let root = push_tail(Rc::new(Node::Branch(empty_branch())), SHIFT_BITS, idx, &new_tail);
+                let root = push_tail(Arc::new(Node::Branch(empty_branch())), SHIFT_BITS, idx, &new_tail);
                 (Some(root), SHIFT_BITS)
             }
             Some(r) if root_full(r) => {
                 // ルートが満杯: 1 段階成長させる
-                let grown = Rc::new(Node::Branch(child_at(r.clone(), 0)));
+                let grown = Arc::new(Node::Branch(child_at(r.clone(), 0)));
                 let root = push_tail(grown, self.shift + SHIFT_BITS, idx, &new_tail);
                 (Some(root), self.shift + SHIFT_BITS)
             }
             Some(r) => {
-                let root = push_tail(Rc::clone(r), self.shift, idx, &new_tail);
+                let root = push_tail(Arc::clone(r), self.shift, idx, &new_tail);
                 (Some(root), self.shift)
             }
         };
@@ -147,45 +147,45 @@ pub fn vector_equal(a: &PVector, b: &PVector) -> bool {
     a.to_vec().iter().zip(b.to_vec().iter()).all(|(x, y)| values_equal(x, y))
 }
 
-fn root_full(root: &Rc<Node>) -> bool {
+fn root_full(root: &Arc<Node>) -> bool {
     match &**root {
         Node::Branch(children) => children.iter().all(|c| c.is_some()),
         Node::Leaf(_) => true,
     }
 }
 
-fn child_at(root: Rc<Node>, slot: usize) -> Vec<Option<Rc<Node>>> {
+fn child_at(root: Arc<Node>, slot: usize) -> Vec<Option<Arc<Node>>> {
     let mut v = empty_branch();
     v[slot] = Some(root);
     v
 }
 
 /// idx を先頭とする tail を、ツリーの正しい位置に葉として押し込む。
-fn push_tail(node: Rc<Node>, shift: u32, idx: usize, tail: &[Value]) -> Rc<Node> {
+fn push_tail(node: Arc<Node>, shift: u32, idx: usize, tail: &[Value]) -> Arc<Node> {
     if shift == 0 {
-        return Rc::new(Node::Leaf(tail.to_vec()));
+        return Arc::new(Node::Leaf(tail.to_vec()));
     }
     let Node::Branch(children) = &*node else {
         unreachable!("push_tail は Branch のみ受け取る")
     };
     let slot = ((idx as u32 >> shift) & MASK) as usize;
     let new_child = match &children[slot] {
-        Some(child) => push_tail(Rc::clone(child), shift - SHIFT_BITS, idx, tail),
-        None => push_tail(Rc::new(Node::Branch(empty_branch())), shift - SHIFT_BITS, idx, tail),
+        Some(child) => push_tail(Arc::clone(child), shift - SHIFT_BITS, idx, tail),
+        None => push_tail(Arc::new(Node::Branch(empty_branch())), shift - SHIFT_BITS, idx, tail),
     };
     let mut new_children = children.clone();
     new_children[slot] = Some(new_child);
-    Rc::new(Node::Branch(new_children))
+    Arc::new(Node::Branch(new_children))
 }
 
-fn assoc_path(node: &Rc<Node>, shift: u32, i: usize, v: Value) -> Rc<Node> {
+fn assoc_path(node: &Arc<Node>, shift: u32, i: usize, v: Value) -> Arc<Node> {
     if shift == 0 {
         let Node::Leaf(vals) = &**node else {
             unreachable!("葉レベルは Leaf")
         };
         let mut new_vals = vals.clone();
         new_vals[((i as u32) & MASK) as usize] = v;
-        return Rc::new(Node::Leaf(new_vals));
+        return Arc::new(Node::Leaf(new_vals));
     }
     let Node::Branch(children) = &**node else {
         unreachable!("分岐レベルは Branch")
@@ -194,10 +194,10 @@ fn assoc_path(node: &Rc<Node>, shift: u32, i: usize, v: Value) -> Rc<Node> {
     let new_child = assoc_path(children[slot].as_ref().expect("パス上にノードがある"), shift - SHIFT_BITS, i, v);
     let mut new_children = children.clone();
     new_children[slot] = Some(new_child);
-    Rc::new(Node::Branch(new_children))
+    Arc::new(Node::Branch(new_children))
 }
 
-fn collect_node(node: &Rc<Node>, out: &mut Vec<Value>) {
+fn collect_node(node: &Arc<Node>, out: &mut Vec<Value>) {
     match &**node {
         Node::Leaf(vals) => out.extend(vals.iter().cloned()),
         Node::Branch(children) => {
@@ -225,13 +225,13 @@ enum Ham {
     /// 挿入順を保つ小さいマップ (≤ 8 エントリ)。
     Array(Vec<(Value, Value)>),
     /// HAMT。
-    Trie(Rc<TrieNode>),
+    Trie(Arc<TrieNode>),
 }
 
 #[derive(Debug)]
 enum TrieNode {
     /// 分岐ノード。bitmap の立ったビット位置に対応する子を持つ。
-    Bitmap { bitmap: u32, children: Vec<Rc<TrieNode>> },
+    Bitmap { bitmap: u32, children: Vec<Arc<TrieNode>> },
     /// 単一エントリの葉。
     Leaf { hash: u64, key: Value, value: Value },
     /// 同一ハッシュの衝突を保持するノード。
@@ -284,7 +284,7 @@ impl PHam {
                     PHam { inner: Ham::Array(new_a) }
                 } else {
                     // しきい値を超えた: HAMT に昇格して挿入
-                    let mut trie = Rc::new(TrieNode::Bitmap { bitmap: 0, children: vec![] });
+                    let mut trie = Arc::new(TrieNode::Bitmap { bitmap: 0, children: vec![] });
                     for (k, v) in a.iter().cloned() {
                         trie = trie_assoc(trie, hash_value(&k), k, v, 0);
                     }
@@ -293,7 +293,7 @@ impl PHam {
                 }
             }
             Ham::Trie(t) => {
-                let trie = trie_assoc(Rc::clone(t), hash_value(&key), key, value, 0);
+                let trie = trie_assoc(Arc::clone(t), hash_value(&key), key, value, 0);
                 PHam { inner: Ham::Trie(trie) }
             }
         }
@@ -306,7 +306,7 @@ impl PHam {
                 let new_a: Vec<_> = a.iter().filter(|(k, _)| !values_equal(k, key)).cloned().collect();
                 PHam { inner: Ham::Array(new_a) }
             }
-            Ham::Trie(t) => match trie_dissoc(Rc::clone(t), hash_value(key), key, 0) {
+            Ham::Trie(t) => match trie_dissoc(Arc::clone(t), hash_value(key), key, 0) {
                 Some(t) => PHam { inner: Ham::Trie(t) },
                 None => PHam::empty(),
             },
@@ -333,7 +333,7 @@ pub fn ham_equal(a: &PHam, b: &PHam) -> bool {
     a.to_vec().iter().all(|(k, v)| b.get(k).is_some_and(|bv| values_equal(&bv, v)))
 }
 
-fn trie_len(t: &Rc<TrieNode>) -> usize {
+fn trie_len(t: &Arc<TrieNode>) -> usize {
     match &**t {
         TrieNode::Leaf { .. } => 1,
         TrieNode::Collision { entries, .. } => entries.len(),
@@ -341,7 +341,7 @@ fn trie_len(t: &Rc<TrieNode>) -> usize {
     }
 }
 
-fn trie_get(t: &Rc<TrieNode>, hash: u64, key: &Value, shift: u32) -> Option<Value> {
+fn trie_get(t: &Arc<TrieNode>, hash: u64, key: &Value, shift: u32) -> Option<Value> {
     match &**t {
         TrieNode::Leaf { hash: h, key: k, value } if *h == hash && values_equal(k, key) => {
             Some(value.clone())
@@ -363,7 +363,7 @@ fn trie_get(t: &Rc<TrieNode>, hash: u64, key: &Value, shift: u32) -> Option<Valu
     }
 }
 
-fn trie_assoc(t: Rc<TrieNode>, hash: u64, key: Value, value: Value, shift: u32) -> Rc<TrieNode> {
+fn trie_assoc(t: Arc<TrieNode>, hash: u64, key: Value, value: Value, shift: u32) -> Arc<TrieNode> {
     match &*t {
         TrieNode::Bitmap { bitmap, children } => {
             let slot = ((hash >> shift) & MASK as u64) as u32;
@@ -373,18 +373,18 @@ fn trie_assoc(t: Rc<TrieNode>, hash: u64, key: Value, value: Value, shift: u32) 
             let mut new_ch = children.clone();
             if *bitmap & bit == 0 {
                 new_bm |= bit;
-                new_ch.insert(idx, Rc::new(TrieNode::Leaf { hash, key, value }));
+                new_ch.insert(idx, Arc::new(TrieNode::Leaf { hash, key, value }));
             } else {
-                new_ch[idx] = trie_assoc(Rc::clone(&children[idx]), hash, key, value, shift + SHIFT_BITS);
+                new_ch[idx] = trie_assoc(Arc::clone(&children[idx]), hash, key, value, shift + SHIFT_BITS);
             }
-            Rc::new(TrieNode::Bitmap { bitmap: new_bm, children: new_ch })
+            Arc::new(TrieNode::Bitmap { bitmap: new_bm, children: new_ch })
         }
         TrieNode::Leaf { .. } | TrieNode::Collision { .. } => merge_node(t, hash, key, value, shift),
     }
 }
 
 /// 葉 (または衝突ノード) と新しいキーを、両方含む部分木にマージする。
-fn merge_node(t: Rc<TrieNode>, hash: u64, key: Value, value: Value, shift: u32) -> Rc<TrieNode> {
+fn merge_node(t: Arc<TrieNode>, hash: u64, key: Value, value: Value, shift: u32) -> Arc<TrieNode> {
     let old_hash = match &*t {
         TrieNode::Leaf { hash, .. } | TrieNode::Collision { hash, .. } => *hash,
         TrieNode::Bitmap { .. } => unreachable!(),
@@ -394,9 +394,9 @@ fn merge_node(t: Rc<TrieNode>, hash: u64, key: Value, value: Value, shift: u32) 
         match &*t {
             TrieNode::Leaf { key: k, value: v, .. } => {
                 if values_equal(k, &key) {
-                    Rc::new(TrieNode::Leaf { hash, key, value })
+                    Arc::new(TrieNode::Leaf { hash, key, value })
                 } else {
-                    Rc::new(TrieNode::Collision { hash, entries: vec![(k.clone(), v.clone()), (key, value)] })
+                    Arc::new(TrieNode::Collision { hash, entries: vec![(k.clone(), v.clone()), (key, value)] })
                 }
             }
             TrieNode::Collision { entries, .. } => {
@@ -406,7 +406,7 @@ fn merge_node(t: Rc<TrieNode>, hash: u64, key: Value, value: Value, shift: u32) 
                 } else {
                     es.push((key, value));
                 }
-                Rc::new(TrieNode::Collision { hash, entries: es })
+                Arc::new(TrieNode::Collision { hash, entries: es })
             }
             TrieNode::Bitmap { .. } => unreachable!(),
         }
@@ -414,27 +414,27 @@ fn merge_node(t: Rc<TrieNode>, hash: u64, key: Value, value: Value, shift: u32) 
         let s1 = ((old_hash >> shift) & MASK as u64) as u32;
         let s2 = ((hash >> shift) & MASK as u64) as u32;
         let mut bm = 0u32;
-        let mut children: Vec<Rc<TrieNode>> = Vec::new();
+        let mut children: Vec<Arc<TrieNode>> = Vec::new();
         if s1 == s2 {
             // 同じスロット: 1 段深くして再帰
             let child = merge_node(t, hash, key, value, shift + SHIFT_BITS);
             add_child(&mut bm, &mut children, s1, child);
         } else {
             add_child(&mut bm, &mut children, s1, t);
-            add_child(&mut bm, &mut children, s2, Rc::new(TrieNode::Leaf { hash, key, value }));
+            add_child(&mut bm, &mut children, s2, Arc::new(TrieNode::Leaf { hash, key, value }));
         }
-        Rc::new(TrieNode::Bitmap { bitmap: bm, children })
+        Arc::new(TrieNode::Bitmap { bitmap: bm, children })
     }
 }
 
-fn add_child(bm: &mut u32, children: &mut Vec<Rc<TrieNode>>, slot: u32, node: Rc<TrieNode>) {
+fn add_child(bm: &mut u32, children: &mut Vec<Arc<TrieNode>>, slot: u32, node: Arc<TrieNode>) {
     let bit = 1u32 << slot;
     let idx = (*bm & (bit - 1)).count_ones() as usize;
     *bm |= bit;
     children.insert(idx, node);
 }
 
-fn trie_dissoc(t: Rc<TrieNode>, hash: u64, key: &Value, shift: u32) -> Option<Rc<TrieNode>> {
+fn trie_dissoc(t: Arc<TrieNode>, hash: u64, key: &Value, shift: u32) -> Option<Arc<TrieNode>> {
     match &*t {
         TrieNode::Leaf { hash: h, key: k, .. } => {
             if *h == hash && values_equal(k, key) {
@@ -452,13 +452,13 @@ fn trie_dissoc(t: Rc<TrieNode>, hash: u64, key: &Value, shift: u32) -> Option<Rc
             if new_entries.len() == entries.len() {
                 Some(t)
             } else if new_entries.len() == 1 {
-                Some(Rc::new(TrieNode::Leaf {
+                Some(Arc::new(TrieNode::Leaf {
                     hash,
                     key: new_entries[0].0.clone(),
                     value: new_entries[0].1.clone(),
                 }))
             } else {
-                Some(Rc::new(TrieNode::Collision { hash, entries: new_entries }))
+                Some(Arc::new(TrieNode::Collision { hash, entries: new_entries }))
             }
         }
         TrieNode::Bitmap { bitmap, children } => {
@@ -468,29 +468,29 @@ fn trie_dissoc(t: Rc<TrieNode>, hash: u64, key: &Value, shift: u32) -> Option<Rc
                 return Some(t);
             }
             let idx = (*bitmap & (bit - 1)).count_ones() as usize;
-            match trie_dissoc(Rc::clone(&children[idx]), hash, key, shift + SHIFT_BITS) {
+            match trie_dissoc(Arc::clone(&children[idx]), hash, key, shift + SHIFT_BITS) {
                 None => {
                     let new_bm = *bitmap & !bit;
                     let mut new_ch = children.clone();
                     new_ch.remove(idx);
                     if new_ch.len() == 1 {
                         // 子が 1 つだけになったら昇格
-                        Some(Rc::clone(&new_ch[0]))
+                        Some(Arc::clone(&new_ch[0]))
                     } else {
-                        Some(Rc::new(TrieNode::Bitmap { bitmap: new_bm, children: new_ch }))
+                        Some(Arc::new(TrieNode::Bitmap { bitmap: new_bm, children: new_ch }))
                     }
                 }
                 Some(new_child) => {
                     let mut new_ch = children.clone();
                     new_ch[idx] = new_child;
-                    Some(Rc::new(TrieNode::Bitmap { bitmap: *bitmap, children: new_ch }))
+                    Some(Arc::new(TrieNode::Bitmap { bitmap: *bitmap, children: new_ch }))
                 }
             }
         }
     }
 }
 
-fn trie_collect(t: &Rc<TrieNode>, out: &mut Vec<(Value, Value)>) {
+fn trie_collect(t: &Arc<TrieNode>, out: &mut Vec<(Value, Value)>) {
     match &**t {
         TrieNode::Leaf { key, value, .. } => out.push((key.clone(), value.clone())),
         TrieNode::Collision { entries, .. } => out.extend(entries.iter().cloned()),
@@ -581,7 +581,10 @@ pub fn hash_value(v: &Value) -> u64 {
             acc.wrapping_add(hash_value(k).wrapping_mul(31).wrapping_add(hash_value(val)))
         }),
         Value::Set(s) => s.to_vec().iter().fold(0u64, |acc, e| acc.wrapping_add(hash_value(e))),
-        Value::MalFn(f) => mix64(Rc::as_ptr(f) as usize as u64),
+        Value::MalFn(f) => mix64(Arc::as_ptr(f) as usize as u64),
+        Value::Atom(a) => mix64(Arc::as_ptr(a) as usize as u64),
+        Value::Ref(r) => mix64(Arc::as_ptr(r) as usize as u64),
+        Value::Future(f) => mix64(Arc::as_ptr(f) as usize as u64),
     }
 }
 
@@ -749,7 +752,7 @@ mod tests {
             (Value::Str("a".into()), Value::Str("a".into())),
             (Value::Keyword("k".into()), Value::Keyword("k".into())),
             (Value::List(list::from_vec(vec![Value::Int(1)])), Value::List(list::from_vec(vec![Value::Int(1)]))),
-            (Value::Vector(Rc::new(PVector::from_vec(vec![Value::Int(1)]))), Value::Vector(Rc::new(PVector::from_vec(vec![Value::Int(1)])))),
+            (Value::Vector(Arc::new(PVector::from_vec(vec![Value::Int(1)]))), Value::Vector(Arc::new(PVector::from_vec(vec![Value::Int(1)])))),
         ];
         for (a, b) in pairs {
             assert!(values_equal(&a, &b), "{:?} == {:?}", a, b);

@@ -1,0 +1,42 @@
+;; 口座振込デモ (SPEC §8.5)
+;;
+;; 不変条件: 総額は常に 4000、残高は負にならない。
+;; 4 つの future が並行に振込を実行しても、STM がこの不変条件を保証する。
+;;
+;; 実行: cargo run -- demos/bank-transfer.mal
+
+(def acc-a (ref 1000))
+(def acc-b (ref 1000))
+(def acc-c (ref 1000))
+(def acc-d (ref 1000))
+
+(defn total [] (+ @acc-a @acc-b @acc-c @acc-d))
+
+(defn transfer [from to amount]
+  (dosync
+    (when (>= @from amount) ; 残高不足なら何もしない (読み取り → 検証 → 書き込み)
+      (alter from - amount)
+      (alter to + amount))))
+
+(defn work [n]
+  (loop [i 0]
+    (when (< i n)
+      (transfer acc-a acc-b 1)
+      (transfer acc-b acc-a 1)
+      (transfer acc-c acc-d 1)
+      (transfer acc-d acc-c 1)
+      (recur (inc i)))))
+
+(println "開始時の総額:" (total))
+
+(def fs [(future (work 2000))
+         (future (work 2000))
+         (future (work 2000))
+         (future (work 2000))])
+(map deref fs)
+
+(println "終了時の総額:" (total))
+(println "口座残高:" @acc-a @acc-b @acc-c @acc-d)
+(println "残高非負:"
+         (and (>= @acc-a 0) (>= @acc-b 0) (>= @acc-c 0) (>= @acc-d 0)))
+(println "デモ完了")

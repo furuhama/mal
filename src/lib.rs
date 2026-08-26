@@ -8,4 +8,5 @@ pub mod eval;
 pub mod persistent;
 pub mod printer;
 pub mod reader;
+pub mod stm;
 pub mod types;
