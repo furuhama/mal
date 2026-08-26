@@ -7,7 +7,16 @@
 
 ## 状態
 
-仕様ドラフト作成中。実装はレビュー合意後に着手する。
+- **Phase 1（コア言語）実装済み**: reader / printer / eval / 特殊形式 / コア関数 / REPL
+- Phase 2（永続データ構造）・Phase 3（STM）は未着手
+
+## 使い方
+
+```sh
+cargo run            # REPL 起動
+cargo run -- file.mal   # ファイル実行
+cargo test           # ユニット + ゴールデンテスト
+```
 
 ## ロードマップ
 

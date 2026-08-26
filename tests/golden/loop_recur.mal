@@ -1,0 +1,15 @@
+(defn fib [n]
+  (loop [i 0 a 0 b 1]
+    (if (= i n) a (recur (inc i) b (+ a b)))))
+(println (fib 10))
+(println (fib 0))
+(println (fib 30))
+(defn sum-to [n]
+  (loop [i 1 acc 0]
+    (if (> i n) acc (recur (inc i) (+ acc i)))))
+(println (sum-to 100))
+(defn countdown [n]
+  (loop [i n]
+    (when (pos? i) (recur (dec i)))))
+(countdown 100000)
+(println "done")

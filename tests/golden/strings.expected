@@ -1,0 +1,13 @@
+ab1
+
+"a\nb"
+:kw
+[1 2]
+(+ 1 2)
+foo
+bar
+:baz
+qux
+3
+3.0
+value=42

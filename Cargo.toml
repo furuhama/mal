@@ -1,0 +1,7 @@
+[package]
+name = "mal"
+version = "0.1.0"
+edition = "2021"
+description = "Clojure ライク Lisp サブセット (学習用)"
+
+[dependencies]

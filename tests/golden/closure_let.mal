@@ -1,0 +1,12 @@
+(defn make-adder [n] (fn [x] (+ x n)))
+(def add5 (make-adder 5))
+(println (add5 10))
+(let [a 1 b 2] (println (+ a b)))
+(def a 100)
+(let [a 1] (println a))
+(println a)
+(defn call-twice [f x] (f (f x)))
+(println (call-twice add5 0))
+(defn make-multiplier [n]
+  (fn [x] (* x n)))
+(println ((make-multiplier 3) 4))

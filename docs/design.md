@@ -47,8 +47,8 @@ pub struct Env {
 pub fn eval(env: &Rc<Env>, form: &Value) -> Result<Value, MalError>
 ```
 
-- 特殊形式は `match` で分岐。関数適用は「全要素を評価 → 先頭が `Fn` なら適用」。
-- **TCO**: `loop`/`recur` は末尾位置を構文検査し、ループに変換する（スタックを消費しない）。
+- 特殊形式は `match` で分岐。関数適用は「全要素を評価 → 先頭が `MalFn` なら適用」。
+- **TCO**: `loop`/`recur` と `fn` 本体末尾の `recur` は、末尾位置検査つきでループに変換する（スタックを消費しない）。末尾位置判定は `tail` フラグを `eval` に渡して行い、`recur` は `EvalErr::Recur(args)` という制御フローで外側の `loop` / fn 適用に伝える。
 - エラー: `MalError { kind: ErrorKind, message: String, pos: Option<Pos> }`。`Display` を実装し、REPL で表示する。
 
 ## 4. リーダー
