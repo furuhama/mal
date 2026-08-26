@@ -1,9 +1,13 @@
 //! 値の表現とエラー型 (SPEC §3, §6.4)。
 //!
-//! Phase 1 ではコレクションは単純な `Vec` ベースで保持する。
-//! Phase 2 で永続データ構造に置き換える (挙動は同一)。
+//! Phase 2 より、コレクションは永続データ構造 (`persistent` モジュール) で保持する。
+//! - リスト: cons セル (単方向連結リスト、先頭追加 O(1))
+//! - ベクタ: 32-way 分岐トライ + tail (`PVector`)
+//! - マップ: Array (≤8) → HAMT (`PHam`)
+//! - セット: マップの値なし版 (`PSet`)
 
 use crate::env::Env;
+use crate::persistent::{ham_equal, set_equal, vector_equal};
 use std::fmt;
 use std::rc::Rc;
 
@@ -17,11 +21,62 @@ pub enum Value {
     Str(String),
     Keyword(String),
     Symbol(String),
-    List(Rc<Vec<Value>>),
-    Vector(Rc<Vec<Value>>),
-    Map(Rc<Vec<(Value, Value)>>),
-    Set(Rc<Vec<Value>>),
+    List(Option<Rc<ListCell>>),
+    Vector(Rc<crate::persistent::PVector>),
+    Map(Rc<crate::persistent::PHam>),
+    Set(Rc<crate::persistent::PSet>),
     MalFn(Rc<MalFn>),
+}
+
+/// リストの cons セル。`None` が空リスト。
+#[derive(Debug)]
+pub struct ListCell {
+    pub head: Value,
+    pub tail: Option<Rc<ListCell>>,
+}
+
+/// リスト操作のヘルパ (Phase 2 より cons セル)。
+pub mod list {
+    use super::*;
+
+    /// Vec から連結リストを構築する。
+    pub fn from_vec(v: Vec<Value>) -> Option<Rc<ListCell>> {
+        let mut l = None;
+        for x in v.into_iter().rev() {
+            l = Some(Rc::new(ListCell { head: x, tail: l }));
+        }
+        l
+    }
+
+    /// 連結リストを Vec に変換する。
+    pub fn to_vec(l: &Option<Rc<ListCell>>) -> Vec<Value> {
+        let mut out = Vec::new();
+        let mut cur = l.as_ref();
+        while let Some(cell) = cur {
+            out.push(cell.head.clone());
+            cur = cell.tail.as_ref();
+        }
+        out
+    }
+
+    pub fn len(l: &Option<Rc<ListCell>>) -> usize {
+        let mut n = 0;
+        let mut cur = l.as_ref();
+        while let Some(cell) = cur {
+            n += 1;
+            cur = cell.tail.as_ref();
+        }
+        n
+    }
+
+    pub fn is_empty(l: &Option<Rc<ListCell>>) -> bool {
+        l.is_none()
+    }
+
+    /// 先頭に追加 (O(1))。
+    pub fn cons(head: Value, tail: Option<Rc<ListCell>>) -> Option<Rc<ListCell>> {
+        Some(Rc::new(ListCell { head, tail }))
+    }
 }
 
 /// 関数 (SPEC §3「関数」)。
@@ -70,22 +125,31 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Str(x), Value::Str(y)) => x == y,
         (Value::Keyword(x), Value::Keyword(y)) => x == y,
         (Value::Symbol(x), Value::Symbol(y)) => x == y,
-        (Value::List(x), Value::List(y)) => vecs_equal(x, y),
-        (Value::Vector(x), Value::Vector(y)) => vecs_equal(x, y),
-        (Value::Map(x), Value::Map(y)) => {
-            x.len() == y.len()
-                && x.iter().all(|(k, v)| y.iter().any(|(k2, v2)| values_equal(k, k2) && values_equal(v, v2)))
-        }
-        (Value::Set(x), Value::Set(y)) => {
-            x.len() == y.len() && x.iter().all(|e| y.iter().any(|e2| values_equal(e, e2)))
-        }
+        (Value::List(x), Value::List(y)) => list_equal(x, y),
+        (Value::Vector(x), Value::Vector(y)) => vector_equal(x, y),
+        (Value::Map(x), Value::Map(y)) => ham_equal(x, y),
+        (Value::Set(x), Value::Set(y)) => set_equal(x, y),
         (Value::MalFn(x), Value::MalFn(y)) => Rc::ptr_eq(x, y),
         _ => false,
     }
 }
 
-fn vecs_equal(x: &[Value], y: &[Value]) -> bool {
-    x.len() == y.len() && x.iter().zip(y).all(|(a, b)| values_equal(a, b))
+fn list_equal(a: &Option<Rc<ListCell>>, b: &Option<Rc<ListCell>>) -> bool {
+    let mut ca = a.as_ref();
+    let mut cb = b.as_ref();
+    loop {
+        match (ca, cb) {
+            (None, None) => return true,
+            (Some(x), Some(y)) => {
+                if !values_equal(&x.head, &y.head) {
+                    return false;
+                }
+                ca = x.tail.as_ref();
+                cb = y.tail.as_ref();
+            }
+            _ => return false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

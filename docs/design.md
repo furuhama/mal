@@ -56,11 +56,60 @@ pub fn eval(env: &Rc<Env>, form: &Value) -> Result<Value, MalError>
 - トークナイザ + 再帰下降パーサ。位置情報（行・列）を保持し、エラーメッセージに含める。
 - `'x` → `(quote x)`、`@x` → `(deref x)` の糖衣はパーサ側で展開する。
 
-## 5. 永続データ構造 (Phase 2)
+## 5. 永続データ構造 (Phase 2) — 実装済み
 
-- **Vector**: 32-way 分岐トライ。ノードは `Vec<Rc<Node>>` または固定 32 要素。Clojure の PersistentVector を参考に tail 最適化を採用するかは実装時に判断する。
-- **Map**: HAMT。bitmap + 32 要素の子スロット。キーのハッシュは `Value` にハッシュ関数を実装して行う（`=` と整合させる）。
-- 詳細は Phase 2 着手時にこの節を書き換える。
+`src/persistent.rs`。すべて `&self` → 新インスタンスの永続操作。共有は `Rc`。
+
+### 5.1 PVector (32-way トライ + tail)
+
+```rust
+struct PVector { root: Option<Rc<Node>>, tail: Vec<Value>, shift: u32, len: usize }
+enum Node {
+    Branch(Vec<Option<Rc<Node>>>), // 非葉: 常に 32 スロット
+    Leaf(Vec<Value>),              // 葉: 常に 32 スロット
+}
+```
+
+- 末尾 32 要素は `tail` に保持 (conj は償却 O(1) に近い)。tail が満杯になったら古い tail をツリーの葉として押し込む (`push_tail` がパスをコピー)。
+- ルートが満杯 (32 子) になったら 1 段階成長 (`shift += 5`)。
+- `get`/`assoc` はシフト演算でパスを辿る。`(i >> shift) & 31` でスロット決定。
+- 構造共有: 更新はパス上のノードだけをコピーするので O(log₃₂ n)。
+
+### 5.2 PHam (Array ≤ 8 → HAMT)
+
+```rust
+struct PHam { inner: Ham }
+enum Ham {
+    Array(Vec<(Value, Value)>),   // ≤ 8 エントリ: 挿入順を保持 (Clojure の array-map 相当)
+    Trie(Rc<TrieNode>),           // 超えたら HAMT に昇格
+}
+enum TrieNode {
+    Bitmap { bitmap: u32, children: Vec<Rc<TrieNode>> }, // 32-way、bitmap でスロット管理
+    Leaf { hash: u64, key: Value, value: Value },
+    Collision { hash: u64, entries: Vec<(Value, Value)> }, // 同一ハッシュ
+}
+```
+
+- 挿入: bitmap の立っていないビット → Leaf を追加。Leaf と衝突 → `merge_node` でスロットが分かれるまで深掘り、同一ハッシュなら Collision。
+- 削除: 子が消えたらビットを落とし、子が 1 つになったら昇格。
+- **ハッシュは `=` と整合させる**: Int/Float は `hash_float_like` (整数値なら i64 正規化) で同一ハッシュ。これにより `(get {:1 "one"} 1.0)` が正しく動く。
+
+### 5.3 PSet / List
+
+- PSet: PHam の値なし版 (値は常に Nil)。
+- List: `Option<Rc<ListCell>>` の cons セル (types.rs)。`first`/`rest`/`cons` が O(1)。
+
+### 5.4 ベンチマーク (release, 100 万要素, 2025 計測)
+
+| 操作 | 時間 |
+|---|---|
+| PVector conj | 536 ns/op |
+| PVector get | 18 ns/op |
+| PVector assoc | 1,729 ns/op |
+| PHam assoc | 6,385 ns/op |
+| PHam get | 487 ns/op |
+
+`cargo run --release --example bench` で再計測できる。
 
 ## 6. STM (Phase 3)
 

@@ -2,9 +2,10 @@
 
 use crate::env::Env;
 use crate::eval::apply as apply_fn;
+use crate::persistent::{PHam, PSet, PVector};
 use crate::printer::{display_str, pr_str};
 use crate::reader::read_str;
-use crate::types::{values_equal, MalError, MalFn, Value};
+use crate::types::{list, values_equal, MalError, MalFn, Value};
 use std::cmp::Ordering;
 use std::io::Write;
 use std::rc::Rc;
@@ -152,8 +153,8 @@ fn pred1(args: &[Value], f: impl Fn(&Value) -> bool) -> Result<Value, MalError> 
 fn seq_elements(v: &Value, who: &str) -> Result<Vec<Value>, MalError> {
     match v {
         Value::Nil => Ok(vec![]),
-        Value::List(l) => Ok(l.iter().cloned().collect()),
-        Value::Vector(vv) => Ok(vv.iter().cloned().collect()),
+        Value::List(l) => Ok(list::to_vec(l)),
+        Value::Vector(vv) => Ok(vv.to_vec()),
         _ => Err(MalError::type_err(format!("{} はシーケンスを要求します: {}", who, pr_str(v)))),
     }
 }
@@ -433,7 +434,7 @@ fn p_seq(args: &[Value]) -> Result<Value, MalError> {
 fn p_empty(args: &[Value]) -> Result<Value, MalError> {
     pred1(args, |v| match v {
         Value::Nil => true,
-        Value::List(l) => l.is_empty(),
+        Value::List(l) => list::is_empty(l),
         Value::Vector(vv) => vv.is_empty(),
         Value::Map(m) => m.is_empty(),
         Value::Set(s) => s.is_empty(),
@@ -480,21 +481,24 @@ fn p_odd(args: &[Value]) -> Result<Value, MalError> {
 // ---------------------------------------------------------------------------
 
 fn list(args: &[Value]) -> Result<Value, MalError> {
-    Ok(Value::List(Rc::new(args.to_vec())))
+    Ok(Value::List(list::from_vec(args.to_vec())))
 }
 
 fn cons(args: &[Value]) -> Result<Value, MalError> {
     if args.len() != 2 {
         return Err(MalError::arity("cons は (cons x coll) の形です"));
     }
-    let mut out = vec![args[0].clone()];
     match &args[1] {
-        Value::Nil => {}
-        Value::List(l) => out.extend(l.iter().cloned()),
-        Value::Vector(v) => out.extend(v.iter().cloned()),
-        _ => return Err(MalError::type_err("cons の第 2 引数はコレクションです")),
+        // リストへの cons は O(1)
+        Value::List(coll) => Ok(Value::List(list::cons(args[0].clone(), coll.clone()))),
+        Value::Nil => Ok(Value::List(list::from_vec(vec![args[0].clone()]))),
+        Value::Vector(v) => {
+            let mut elems = v.to_vec();
+            elems.insert(0, args[0].clone());
+            Ok(Value::List(list::from_vec(elems)))
+        }
+        _ => Err(MalError::type_err("cons の第 2 引数はコレクションです")),
     }
-    Ok(Value::List(Rc::new(out)))
 }
 
 fn first(args: &[Value]) -> Result<Value, MalError> {
@@ -503,8 +507,8 @@ fn first(args: &[Value]) -> Result<Value, MalError> {
     }
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
-        Value::List(l) => Ok(l.first().cloned().unwrap_or(Value::Nil)),
-        Value::Vector(v) => Ok(v.first().cloned().unwrap_or(Value::Nil)),
+        Value::List(l) => Ok(l.as_ref().map(|c| c.head.clone()).unwrap_or(Value::Nil)),
+        Value::Vector(v) => Ok(v.get(0).unwrap_or(Value::Nil)),
         _ => Err(MalError::type_err("first はリスト・ベクタにのみ対応します")),
     }
 }
@@ -514,9 +518,10 @@ fn rest(args: &[Value]) -> Result<Value, MalError> {
         return Err(MalError::arity("rest は 1 引数です"));
     }
     match &args[0] {
-        Value::Nil => Ok(Value::List(Rc::new(vec![]))),
-        Value::List(l) => Ok(Value::List(Rc::new(l.iter().skip(1).cloned().collect()))),
-        Value::Vector(v) => Ok(Value::List(Rc::new(v.iter().skip(1).cloned().collect()))),
+        Value::Nil => Ok(Value::List(None)),
+        // リストの rest は tail を返すだけ (O(1))
+        Value::List(l) => Ok(Value::List(l.as_ref().and_then(|c| c.tail.clone()))),
+        Value::Vector(v) => Ok(Value::List(list::from_vec(v.to_vec().into_iter().skip(1).collect()))),
         _ => Err(MalError::type_err("rest はリスト・ベクタにのみ対応します")),
     }
 }
@@ -528,16 +533,14 @@ fn next(args: &[Value]) -> Result<Value, MalError> {
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
         // Clojure 準拠: 残りがない場合は nil
-        Value::List(l) => {
-            if l.len() > 1 {
-                Ok(Value::List(Rc::new(l[1..].to_vec())))
-            } else {
-                Ok(Value::Nil)
-            }
-        }
+        Value::List(l) => match l.as_ref().and_then(|c| c.tail.as_ref()) {
+            Some(_) => Ok(Value::List(l.as_ref().and_then(|c| c.tail.clone()))),
+            None => Ok(Value::Nil),
+        },
         Value::Vector(v) => {
-            if v.len() > 1 {
-                Ok(Value::List(Rc::new(v[1..].to_vec())))
+            let elems = v.to_vec();
+            if elems.len() > 1 {
+                Ok(Value::List(list::from_vec(elems[1..].to_vec())))
             } else {
                 Ok(Value::Nil)
             }
@@ -552,8 +555,23 @@ fn last(args: &[Value]) -> Result<Value, MalError> {
     }
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
-        Value::List(l) => Ok(l.last().cloned().unwrap_or(Value::Nil)),
-        Value::Vector(v) => Ok(v.last().cloned().unwrap_or(Value::Nil)),
+        Value::List(l) => {
+            let mut cur = l.as_ref();
+            let mut last = None;
+            while let Some(c) = cur {
+                last = Some(c.head.clone());
+                cur = c.tail.as_ref();
+            }
+            Ok(last.unwrap_or(Value::Nil))
+        }
+        Value::Vector(v) => {
+            let len = v.len();
+            if len == 0 {
+                Ok(Value::Nil)
+            } else {
+                Ok(v.get(len - 1).unwrap_or(Value::Nil))
+            }
+        }
         _ => Err(MalError::type_err("last はリスト・ベクタにのみ対応します")),
     }
 }
@@ -564,20 +582,24 @@ fn conj(args: &[Value]) -> Result<Value, MalError> {
     }
     let (head, items) = args.split_first().unwrap();
     match head {
-        Value::Nil => Ok(Value::List(Rc::new(items.to_vec()))),
+        Value::Nil => Ok(Value::List(list::from_vec(items.to_vec()))),
         Value::List(l) => {
-            let mut out = items.to_vec();
-            out.reverse();
-            out.extend(l.iter().cloned());
-            Ok(Value::List(Rc::new(out)))
+            // Clojure 準拠: 先頭に順方向で追加 (最後の引数が先頭に来る)
+            let mut out = l.clone();
+            for x in items {
+                out = list::cons(x.clone(), out);
+            }
+            Ok(Value::List(out))
         }
         Value::Vector(v) => {
-            let mut out = v.iter().cloned().collect::<Vec<_>>();
-            out.extend(items.iter().cloned());
+            let mut out = (**v).clone();
+            for x in items {
+                out = out.conj(x.clone());
+            }
             Ok(Value::Vector(Rc::new(out)))
         }
         Value::Map(m) => {
-            let mut out = m.iter().cloned().collect::<Vec<_>>();
+            let mut out = (**m).clone();
             for item in items {
                 let Value::Vector(e) = item else {
                     return Err(MalError::type_err("マップへの conj は [k v] の形です"));
@@ -585,16 +607,14 @@ fn conj(args: &[Value]) -> Result<Value, MalError> {
                 if e.len() != 2 {
                     return Err(MalError::type_err("マップへの conj は [k v] の形です"));
                 }
-                out.push((e[0].clone(), e[1].clone()));
+                out = out.assoc(e.get(0).unwrap_or(Value::Nil), e.get(1).unwrap_or(Value::Nil));
             }
             Ok(Value::Map(Rc::new(out)))
         }
         Value::Set(s) => {
-            let mut out = s.iter().cloned().collect::<Vec<_>>();
-            for item in items {
-                if !out.iter().any(|e| values_equal(e, item)) {
-                    out.push(item.clone());
-                }
+            let mut out = (**s).clone();
+            for x in items {
+                out = out.conj(x.clone());
             }
             Ok(Value::Set(Rc::new(out)))
         }
@@ -608,10 +628,21 @@ fn seq(args: &[Value]) -> Result<Value, MalError> {
     }
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
-        Value::List(l) if l.is_empty() => Ok(Value::Nil),
-        Value::Vector(v) if v.is_empty() => Ok(Value::Nil),
-        Value::List(l) => Ok(Value::List(Rc::clone(l))),
-        Value::Vector(v) => Ok(Value::List(Rc::new(v.iter().cloned().collect()))),
+        Value::List(l) => {
+            if l.is_none() {
+                Ok(Value::Nil)
+            } else {
+                Ok(Value::List(l.clone()))
+            }
+        }
+        Value::Vector(v) => {
+            let elems = v.to_vec();
+            if elems.is_empty() {
+                Ok(Value::Nil)
+            } else {
+                Ok(Value::List(list::from_vec(elems)))
+            }
+        }
         _ => Err(MalError::type_err("seq はリスト・ベクタにのみ対応します")),
     }
 }
@@ -622,7 +653,7 @@ fn count(args: &[Value]) -> Result<Value, MalError> {
     }
     let n = match &args[0] {
         Value::Nil => 0,
-        Value::List(l) => l.len(),
+        Value::List(l) => list::len(l),
         Value::Vector(v) => v.len(),
         Value::Map(m) => m.len(),
         Value::Set(s) => s.len(),
@@ -642,10 +673,19 @@ fn nth(args: &[Value]) -> Result<Value, MalError> {
     }
     let idx = i as usize;
     match &args[0] {
-        Value::List(l) => l.get(idx).cloned().ok_or_else(|| {
-            MalError::range(format!("nth: インデックス {} が範囲外 (長さ {})", i, l.len()))
-        }),
-        Value::Vector(v) => v.get(idx).cloned().ok_or_else(|| {
+        Value::List(l) => {
+            let mut cur = l.as_ref();
+            let mut j = 0usize;
+            while let Some(c) = cur {
+                if j == idx {
+                    return Ok(c.head.clone());
+                }
+                j += 1;
+                cur = c.tail.as_ref();
+            }
+            Err(MalError::range(format!("nth: インデックス {} が範囲外 (長さ {})", i, list::len(l))))
+        }
+        Value::Vector(v) => v.get(idx).ok_or_else(|| {
             MalError::range(format!("nth: インデックス {} が範囲外 (長さ {})", i, v.len()))
         }),
         _ => Err(MalError::type_err("nth はリスト・ベクタにのみ対応します")),
@@ -657,7 +697,7 @@ fn nth(args: &[Value]) -> Result<Value, MalError> {
 // ---------------------------------------------------------------------------
 
 fn vector(args: &[Value]) -> Result<Value, MalError> {
-    Ok(Value::Vector(Rc::new(args.to_vec())))
+    Ok(Value::Vector(Rc::new(PVector::from_vec(args.to_vec()))))
 }
 
 fn vec(args: &[Value]) -> Result<Value, MalError> {
@@ -665,8 +705,8 @@ fn vec(args: &[Value]) -> Result<Value, MalError> {
         return Err(MalError::arity("vec は 1 引数です"));
     }
     match &args[0] {
-        Value::Nil => Ok(Value::Vector(Rc::new(vec![]))),
-        Value::List(l) => Ok(Value::Vector(Rc::new(l.iter().cloned().collect()))),
+        Value::Nil => Ok(Value::Vector(Rc::new(PVector::empty()))),
+        Value::List(l) => Ok(Value::Vector(Rc::new(PVector::from_vec(list::to_vec(l))))),
         Value::Vector(v) => Ok(Value::Vector(Rc::clone(v))),
         _ => Err(MalError::type_err("vec はリスト・ベクタにのみ対応します")),
     }
@@ -680,13 +720,13 @@ fn hash_map(args: &[Value]) -> Result<Value, MalError> {
     if !args.len().is_multiple_of(2) {
         return Err(MalError::arity("hash-map は偶数個の引数が必要です"));
     }
-    let mut out = Vec::with_capacity(args.len() / 2);
+    let mut pairs = Vec::with_capacity(args.len() / 2);
     let mut i = 0;
     while i < args.len() {
-        out.push((args[i].clone(), args[i + 1].clone()));
+        pairs.push((args[i].clone(), args[i + 1].clone()));
         i += 2;
     }
-    Ok(Value::Map(Rc::new(out)))
+    Ok(Value::Map(Rc::new(PHam::from_vec(pairs))))
 }
 
 fn get(args: &[Value]) -> Result<Value, MalError> {
@@ -695,15 +735,11 @@ fn get(args: &[Value]) -> Result<Value, MalError> {
     }
     match &args[0] {
         Value::Nil => Ok(Value::Nil),
-        Value::Map(m) => Ok(m
-            .iter()
-            .find(|(k, _)| values_equal(k, &args[1]))
-            .map(|(_, v)| v.clone())
-            .unwrap_or(Value::Nil)),
+        Value::Map(m) => Ok(m.get(&args[1]).unwrap_or(Value::Nil)),
         Value::Vector(v) => {
             if let Value::Int(i) = &args[1] {
                 if *i >= 0 {
-                    return Ok(v.get(*i as usize).cloned().unwrap_or(Value::Nil));
+                    return Ok(v.get(*i as usize).unwrap_or(Value::Nil));
                 }
             }
             Ok(Value::Nil)
@@ -716,19 +752,14 @@ fn assoc(args: &[Value]) -> Result<Value, MalError> {
     if args.len() < 3 || args.len().is_multiple_of(2) {
         return Err(MalError::arity("assoc は (assoc m k v ...) の形です"));
     }
-    let mut out: Vec<(Value, Value)> = match &args[0] {
-        Value::Nil => vec![],
-        Value::Map(m) => m.iter().cloned().collect(),
+    let mut out: PHam = match &args[0] {
+        Value::Nil => PHam::empty(),
+        Value::Map(m) => (**m).clone(),
         _ => return Err(MalError::type_err("assoc の第 1 引数はマップです")),
     };
     let mut i = 1;
     while i < args.len() {
-        let (k, v) = (args[i].clone(), args[i + 1].clone());
-        if let Some(slot) = out.iter_mut().find(|(ek, _)| values_equal(ek, &k)) {
-            slot.1 = v;
-        } else {
-            out.push((k, v));
-        }
+        out = out.assoc(args[i].clone(), args[i + 1].clone());
         i += 2;
     }
     Ok(Value::Map(Rc::new(out)))
@@ -741,11 +772,10 @@ fn dissoc(args: &[Value]) -> Result<Value, MalError> {
     let Value::Map(m) = &args[0] else {
         return Err(MalError::type_err("dissoc の第 1 引数はマップです"));
     };
-    let out: Vec<(Value, Value)> = m
-        .iter()
-        .filter(|(k, _)| !args[1..].iter().any(|a| values_equal(a, k)))
-        .cloned()
-        .collect();
+    let mut out = (**m).clone();
+    for k in &args[1..] {
+        out = out.dissoc(k);
+    }
     Ok(Value::Map(Rc::new(out)))
 }
 
@@ -754,8 +784,8 @@ fn contains(args: &[Value]) -> Result<Value, MalError> {
         return Err(MalError::arity("contains? は (contains? coll k) の形です"));
     }
     match &args[0] {
-        Value::Map(m) => Ok(Value::Bool(m.iter().any(|(k, _)| values_equal(k, &args[1])))),
-        Value::Set(s) => Ok(Value::Bool(s.iter().any(|e| values_equal(e, &args[1])))),
+        Value::Map(m) => Ok(Value::Bool(m.get(&args[1]).is_some())),
+        Value::Set(s) => Ok(Value::Bool(s.contains(&args[1]))),
         _ => Err(MalError::type_err("contains? はマップ・セットにのみ対応します")),
     }
 }
@@ -767,7 +797,9 @@ fn keys(args: &[Value]) -> Result<Value, MalError> {
     let Value::Map(m) = &args[0] else {
         return Err(MalError::type_err("keys はマップにのみ対応します"));
     };
-    Ok(Value::List(Rc::new(m.iter().map(|(k, _)| k.clone()).collect())))
+    Ok(Value::List(list::from_vec(
+        m.to_vec().into_iter().map(|(k, _)| k).collect(),
+    )))
 }
 
 fn vals(args: &[Value]) -> Result<Value, MalError> {
@@ -777,21 +809,19 @@ fn vals(args: &[Value]) -> Result<Value, MalError> {
     let Value::Map(m) = &args[0] else {
         return Err(MalError::type_err("vals はマップにのみ対応します"));
     };
-    Ok(Value::List(Rc::new(m.iter().map(|(_, v)| v.clone()).collect())))
+    Ok(Value::List(list::from_vec(
+        m.to_vec().into_iter().map(|(_, v)| v).collect(),
+    )))
 }
 
 fn merge(args: &[Value]) -> Result<Value, MalError> {
-    let mut out: Vec<(Value, Value)> = Vec::new();
+    let mut out = PHam::empty();
     for a in args {
         let Value::Map(m) = a else {
             return Err(MalError::type_err("merge はマップのみ受け付けます"));
         };
-        for (k, v) in m.iter() {
-            if let Some(slot) = out.iter_mut().find(|(ek, _)| values_equal(ek, k)) {
-                slot.1 = v.clone();
-            } else {
-                out.push((k.clone(), v.clone()));
-            }
+        for (k, v) in m.to_vec() {
+            out = out.assoc(k, v);
         }
     }
     Ok(Value::Map(Rc::new(out)))
@@ -807,17 +837,11 @@ fn set(args: &[Value]) -> Result<Value, MalError> {
     }
     let elems: Vec<Value> = match &args[0] {
         Value::Nil => vec![],
-        Value::List(l) => l.iter().cloned().collect(),
-        Value::Vector(v) => v.iter().cloned().collect(),
+        Value::List(l) => list::to_vec(l),
+        Value::Vector(v) => v.to_vec(),
         _ => return Err(MalError::type_err("set はリスト・ベクタにのみ対応します")),
     };
-    let mut out: Vec<Value> = Vec::new();
-    for e in elems {
-        if !out.iter().any(|x| values_equal(x, &e)) {
-            out.push(e);
-        }
-    }
-    Ok(Value::Set(Rc::new(out)))
+    Ok(Value::Set(Rc::new(PSet::from_vec(elems))))
 }
 
 fn disj(args: &[Value]) -> Result<Value, MalError> {
@@ -827,11 +851,10 @@ fn disj(args: &[Value]) -> Result<Value, MalError> {
     let Value::Set(s) = &args[0] else {
         return Err(MalError::type_err("disj の第 1 引数はセットです"));
     };
-    let out: Vec<Value> = s
-        .iter()
-        .filter(|e| !args[1..].iter().any(|a| values_equal(a, e)))
-        .cloned()
-        .collect();
+    let mut out = (**s).clone();
+    for e in &args[1..] {
+        out = out.disj(e);
+    }
     Ok(Value::Set(Rc::new(out)))
 }
 
@@ -848,7 +871,7 @@ fn map(args: &[Value]) -> Result<Value, MalError> {
     for e in seq_elements(&args[1], "map")? {
         out.push(apply_fn(f, &[e])?);
     }
-    Ok(Value::List(Rc::new(out)))
+    Ok(Value::List(list::from_vec(out)))
 }
 
 fn filter(args: &[Value]) -> Result<Value, MalError> {
@@ -862,7 +885,7 @@ fn filter(args: &[Value]) -> Result<Value, MalError> {
             out.push(e);
         }
     }
-    Ok(Value::List(Rc::new(out)))
+    Ok(Value::List(list::from_vec(out)))
 }
 
 fn reduce(args: &[Value]) -> Result<Value, MalError> {
@@ -900,8 +923,8 @@ fn apply_builtin(args: &[Value]) -> Result<Value, MalError> {
     let mut all: Vec<Value> = prefix[1..].to_vec();
     match coll {
         Value::Nil => {}
-        Value::List(l) => all.extend(l.iter().cloned()),
-        Value::Vector(v) => all.extend(v.iter().cloned()),
+        Value::List(l) => all.extend(list::to_vec(l)),
+        Value::Vector(v) => all.extend(v.to_vec()),
         _ => return Err(MalError::type_err("apply の最後の引数はコレクションです")),
     }
     apply_fn(f, &all)

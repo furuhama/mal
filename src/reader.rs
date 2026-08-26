@@ -144,10 +144,10 @@ impl Parser<'_> {
     fn parse_form(&mut self) -> Result<Value, MalError> {
         let tok = self.next().ok_or_else(|| MalError::reader_eof("式が途中で終わっています"))?;
         match tok.text.as_str() {
-            "(" => self.parse_seq(')', |v| Value::List(Rc::new(v))),
-            "[" => self.parse_seq(']', |v| Value::Vector(Rc::new(v))),
+            "(" => self.parse_seq(')', |v| Value::List(crate::types::list::from_vec(v))),
+            "[" => self.parse_seq(']', |v| Value::Vector(Rc::new(crate::persistent::PVector::from_vec(v)))),
             "{" => self.parse_map(),
-            "#{" => self.parse_seq('}', |v| Value::Set(Rc::new(v))),
+            "#{" => self.parse_seq('}', |v| Value::Set(Rc::new(crate::persistent::PSet::from_vec(v)))),
             ")" | "]" | "}" => Err(self.pos_err(&tok, "対応する開き括弧がありません")),
             "'" => self.parse_sugar(&tok, "quote"),
             "@" => self.parse_sugar(&tok, "deref"),
@@ -161,7 +161,10 @@ impl Parser<'_> {
             return Err(self.pos_err(tok, &format!("{} の対象となる式がありません", name)));
         }
         let form = self.parse_form()?;
-        Ok(Value::List(Rc::new(vec![Value::Symbol(name.to_string()), form])))
+        Ok(Value::List(crate::types::list::from_vec(vec![
+            Value::Symbol(name.to_string()),
+            form,
+        ])))
     }
 
     fn parse_seq(&mut self, close: char, make: impl Fn(Vec<Value>) -> Value) -> Result<Value, MalError> {
@@ -188,7 +191,7 @@ impl Parser<'_> {
                 None => return Err(MalError::reader_eof("対応する閉じ括弧がありません")),
                 Some(t) if t.text == "}" => {
                     self.next();
-                    return Ok(Value::Map(Rc::new(items)));
+                    return Ok(Value::Map(Rc::new(crate::persistent::PHam::from_vec(items))));
                 }
                 Some(t) if t.text == ")" || t.text == "]" => {
                     return Err(self.pos_err(t, "括弧の種類が一致しません"));

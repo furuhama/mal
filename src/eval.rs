@@ -5,8 +5,9 @@
 //! それ以外の位置では構文エラーになる。
 
 use crate::env::Env;
+use crate::persistent::{PHam, PSet, PVector};
 use crate::printer::pr_str;
-use crate::types::{MalError, MalFn, UserFn, Value};
+use crate::types::{list, MalError, MalFn, UserFn, Value};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -37,25 +38,25 @@ pub fn eval(env: &Rc<Env>, form: &Value, tail: bool) -> Result<Value, EvalErr> {
     match form {
         Value::Symbol(name) => env.get(name).ok_or_else(|| MalError::unbound(name).into()),
         Value::List(list) => eval_list(env, list, tail),
-        // コレクションは要素を評価する (SPEC §6.1-2)
+        // コレクションは要素を評価して新しい永続コレクションを作る (SPEC §6.1-2)
         Value::Vector(vec) => {
-            let mut out = Vec::with_capacity(vec.len());
-            for e in vec.iter() {
-                out.push(eval(env, e, false)?);
+            let mut out = PVector::empty();
+            for e in vec.to_vec() {
+                out = out.conj(eval(env, &e, false)?);
             }
             Ok(Value::Vector(Rc::new(out)))
         }
         Value::Map(map) => {
-            let mut out = Vec::with_capacity(map.len());
-            for (k, v) in map.iter() {
-                out.push((eval(env, k, false)?, eval(env, v, false)?));
+            let mut out = PHam::empty();
+            for (k, v) in map.to_vec() {
+                out = out.assoc(eval(env, &k, false)?, eval(env, &v, false)?);
             }
             Ok(Value::Map(Rc::new(out)))
         }
         Value::Set(set) => {
-            let mut out = Vec::with_capacity(set.len());
-            for e in set.iter() {
-                out.push(eval(env, e, false)?);
+            let mut out = PSet::empty();
+            for e in set.to_vec() {
+                out = out.conj(eval(env, &e, false)?);
             }
             Ok(Value::Set(Rc::new(out)))
         }
@@ -64,20 +65,22 @@ pub fn eval(env: &Rc<Env>, form: &Value, tail: bool) -> Result<Value, EvalErr> {
     }
 }
 
-fn eval_list(env: &Rc<Env>, list: &[Value], tail: bool) -> Result<Value, EvalErr> {
-    if list.is_empty() {
+fn eval_list(env: &Rc<Env>, list: &Option<Rc<crate::types::ListCell>>, tail: bool) -> Result<Value, EvalErr> {
+    let Some(head_cell) = list else {
         // 空リストは自分自身に評価される (Clojure 準拠)
-        return Ok(Value::List(Rc::new(vec![])));
-    }
-    if let Value::Symbol(name) = &list[0] {
+        return Ok(Value::List(None));
+    };
+    if let Value::Symbol(name) = &head_cell.head {
         if let Some(special) = special_form(name) {
-            return eval_special(env, special, list, tail);
+            return eval_special(env, special, &list::to_vec(list), tail);
         }
     }
-    let f = eval(env, &list[0], false)?;
-    let mut args = Vec::with_capacity(list.len() - 1);
-    for a in &list[1..] {
-        args.push(eval(env, a, false)?);
+    let f = eval(env, &head_cell.head, false)?;
+    let mut args = Vec::new();
+    let mut cur = head_cell.tail.as_ref();
+    while let Some(cell) = cur {
+        args.push(eval(env, &cell.head, false)?);
+        cur = cell.tail.as_ref();
     }
     apply(&f, &args).map_err(EvalErr::Mal)
 }
@@ -141,17 +144,18 @@ fn eval_special(env: &Rc<Env>, name: &str, list: &[Value], tail: bool) -> Result
             let Value::Vector(bindings) = &list[1] else {
                 return Err(MalError::syntax("let の第 1 引数はバインディングのベクタである必要があります").into());
             };
-            if bindings.len() % 2 != 0 {
+            let bvec = bindings.to_vec();
+            if !bvec.len().is_multiple_of(2) {
                 return Err(MalError::syntax("let のバインディングは偶数個である必要があります").into());
             }
             // 並行バインディング: 右辺はすべて親環境で評価してからまとめて束縛する
             let mut pairs: Vec<(String, Value)> = Vec::new();
             let mut i = 0;
-            while i < bindings.len() {
-                let Value::Symbol(sym) = &bindings[i] else {
+            while i < bvec.len() {
+                let Value::Symbol(sym) = &bvec[i] else {
                     return Err(MalError::syntax("let のバインディング名はシンボルである必要があります").into());
                 };
-                let v = eval(env, &bindings[i + 1], false)?;
+                let v = eval(env, &bvec[i + 1], false)?;
                 pairs.push((sym.clone(), v));
                 i += 2;
             }
@@ -243,17 +247,18 @@ fn eval_special(env: &Rc<Env>, name: &str, list: &[Value], tail: bool) -> Result
             let Value::Vector(bindings) = &list[1] else {
                 return Err(MalError::syntax("loop の第 1 引数はバインディングのベクタである必要があります").into());
             };
-            if bindings.len() % 2 != 0 {
+            let bvec = bindings.to_vec();
+            if !bvec.len().is_multiple_of(2) {
                 return Err(MalError::syntax("loop のバインディングは偶数個である必要があります").into());
             }
             let mut names: Vec<String> = Vec::new();
             let mut values: Vec<Value> = Vec::new();
             let mut i = 0;
-            while i < bindings.len() {
-                let Value::Symbol(sym) = &bindings[i] else {
+            while i < bvec.len() {
+                let Value::Symbol(sym) = &bvec[i] else {
                     return Err(MalError::syntax("loop のバインディング名はシンボルである必要があります").into());
                 };
-                let v = eval(env, &bindings[i + 1], false)?;
+                let v = eval(env, &bvec[i + 1], false)?;
                 names.push(sym.clone());
                 values.push(v);
                 i += 2;
@@ -315,19 +320,20 @@ fn parse_params(form: &Value) -> Result<(Vec<String>, Option<String>), MalError>
     let Value::Vector(ps) = form else {
         return Err(MalError::syntax("fn の引数はベクタである必要があります"));
     };
+    let pvec = ps.to_vec();
     let mut params = Vec::new();
     let mut rest = None;
     let mut i = 0;
-    while i < ps.len() {
-        match &ps[i] {
+    while i < pvec.len() {
+        match &pvec[i] {
             Value::Symbol(s) if s == "&" => {
-                if i + 1 >= ps.len() {
+                if i + 1 >= pvec.len() {
                     return Err(MalError::syntax("& の後には rest 引数名が必要です"));
                 }
-                if i + 2 != ps.len() {
+                if i + 2 != pvec.len() {
                     return Err(MalError::syntax("& は最後の引数にのみ使用できます"));
                 }
-                let Value::Symbol(r) = &ps[i + 1] else {
+                let Value::Symbol(r) = &pvec[i + 1] else {
                     return Err(MalError::syntax("& の後はシンボルである必要があります"));
                 };
                 rest = Some(r.clone());
@@ -421,7 +427,7 @@ fn bind_env(uf: &UserFn, args: &[Value]) -> Result<Rc<Env>, MalError> {
         call_env.set(p.clone(), a.clone());
     }
     if let Some(r) = &uf.rest {
-        call_env.set(r.clone(), Value::List(Rc::new(args[uf.params.len()..].to_vec())));
+        call_env.set(r.clone(), Value::List(list::from_vec(args[uf.params.len()..].to_vec())));
     }
     Ok(call_env)
 }

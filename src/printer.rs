@@ -1,6 +1,6 @@
 //! プリンター (SPEC §5)。読み取り可能表現 (`pr-str`) と表示用表現 (`str` / `print`)。
 
-use crate::types::{MalFn, Value};
+use crate::types::{list, MalFn, Value};
 
 /// 読み取り可能表現。`read(print(x)) == x` をラウンドトリップ保証する。
 pub fn pr_str(v: &Value) -> String {
@@ -18,17 +18,17 @@ pub fn pr_str(v: &Value) -> String {
         Value::Str(s) => escape(s),
         Value::Keyword(k) => format!(":{}", k),
         Value::Symbol(s) => s.clone(),
-        Value::List(l) => format!("({})", join(l)),
-        Value::Vector(v) => format!("[{}]", join(v)),
+        Value::List(l) => format!("({})", join(&list::to_vec(l))),
+        Value::Vector(v) => format!("[{}]", join(&v.to_vec())),
         Value::Map(m) => {
-            let mut parts = Vec::with_capacity(m.len() * 2);
-            for (k, v) in m.iter() {
-                parts.push(pr_str(k));
-                parts.push(pr_str(v));
+            let mut parts = Vec::new();
+            for (k, v) in m.to_vec() {
+                parts.push(pr_str(&k));
+                parts.push(pr_str(&v));
             }
             format!("{{{}}}", parts.join(" "))
         }
-        Value::Set(s) => format!("#{{{}}}", join(s)),
+        Value::Set(s) => format!("#{{{}}}", join(&s.to_vec())),
         Value::MalFn(f) => match &**f {
             MalFn::Builtin { name, .. } => format!("#<builtin {}>", name),
             _ => "#<fn>".to_string(),

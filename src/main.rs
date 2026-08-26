@@ -1,21 +1,14 @@
 //! REPL / ファイル実行 (SPEC §10)。
 
-mod core;
-mod env;
-mod eval;
-mod printer;
-mod reader;
-mod types;
-
 use std::io::Write;
 use std::rc::Rc;
 
-use crate::env::Env;
-use crate::types::Value;
+use mal::env::Env;
+use mal::types::Value;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let env = core::default_env();
+    let env = mal::core::default_env();
     match args.len() {
         1 => repl(&env),
         2 => run_file(&env, &args[1]),
@@ -40,15 +33,15 @@ fn repl(env: &Rc<Env>) {
             Ok(0) => break, // EOF
             Ok(_) => {
                 buffer.push_str(&line);
-                match reader::read_forms(&buffer) {
+                match mal::reader::read_forms(&buffer) {
                     Ok(forms) => {
                         buffer.clear();
                         for form in forms {
                             if is_exit(&form) {
                                 return;
                             }
-                            match eval::eval_top(env, &form) {
-                                Ok(v) => println!("{}", printer::pr_str(&v)),
+                            match mal::eval::eval_top(env, &form) {
+                                Ok(v) => println!("{}", mal::printer::pr_str(&v)),
                                 Err(e) => println!("Error: {}", e),
                             }
                         }
@@ -72,7 +65,9 @@ fn repl(env: &Rc<Env>) {
 }
 
 fn is_exit(form: &Value) -> bool {
-    matches!(form, Value::List(l) if l.len() == 1 && matches!(&l[0], Value::Symbol(s) if s == "exit"))
+    matches!(form, Value::List(l) if l.is_some()
+        && matches!(&l.as_ref().unwrap().head, Value::Symbol(s) if s == "exit")
+        && l.as_ref().unwrap().tail.is_none())
 }
 
 fn run_file(env: &Rc<Env>, path: &str) {
@@ -83,7 +78,7 @@ fn run_file(env: &Rc<Env>, path: &str) {
             std::process::exit(1);
         }
     };
-    let forms = match reader::read_forms(&src) {
+    let forms = match mal::reader::read_forms(&src) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("{}", e);
@@ -91,7 +86,7 @@ fn run_file(env: &Rc<Env>, path: &str) {
         }
     };
     for form in &forms {
-        if let Err(e) = eval::eval_top(env, form) {
+        if let Err(e) = mal::eval::eval_top(env, form) {
             eprintln!("{}", e);
             std::process::exit(1);
         }
